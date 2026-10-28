@@ -1,0 +1,12 @@
+{
+  "agents": ["10.0.0.21:31890", "build-pc-07"],
+  "discovery": true,
+  "discovery_port": 31891,
+  "token": "",
+  "max_local": 0,
+  "local_first": true,
+  "retry_remote_failures_locally": true,
+  "connect_timeout": 3,
+  "job_timeout": 600,
+  "verbose": false
+}

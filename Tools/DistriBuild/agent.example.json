@@ -1,0 +1,12 @@
+{
+  "name": "BUILD-PC-07",
+  "port": 31890,
+  "discovery_port": 31891,
+  "slots": 16,
+  "token": "",
+  "work_dir": "D:/DistriBuildWork",
+  "job_timeout": 600,
+  "engines": ["C:/Program Files/Epic Games/UE_5.4"],
+  "compilers": [],
+  "auto_detect": true
+}

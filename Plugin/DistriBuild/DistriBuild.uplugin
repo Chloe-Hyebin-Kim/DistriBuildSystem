@@ -1,0 +1,27 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "DistriBuild - Distributed Build Accelerator",
+	"Description": "Distributes shader compilation (and, with the bundled xgConsole front end, C++ compilation) across agent machines on the LAN, similar to Incredibuild.",
+	"Category": "Programming",
+	"CreatedBy": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"EnabledByDefault": false,
+	"Modules": [
+		{
+			"Name": "DistriBuild",
+			"Type": "Editor",
+			"LoadingPhase": "PostConfigInit",
+			"PlatformAllowList": [ "Win64", "Linux", "Mac" ]
+		},
+		{
+			"Name": "DistriBuildEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Linux", "Mac" ]
+		}
+	]
+}

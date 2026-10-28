@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+
+# Unreal plugin build output
+Plugin/DistriBuild/Binaries/
+Plugin/DistriBuild/Intermediate/
+
+# IDE
+.vs/
+.vscode/
+.idea/
