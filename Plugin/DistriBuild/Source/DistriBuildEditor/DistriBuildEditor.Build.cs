@@ -11,16 +11,29 @@ public class DistriBuildEditor : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
-			"DeveloperSettings",
 			"Slate",
 			"SlateCore",
 			"InputCore",
 			"ToolMenus",
 			"Settings",
-			"EditorFramework",
 			"UnrealEd",
 			"WorkspaceMenuStructure",
 			"DistriBuild",
 		});
+
+		int Major = Target.Version.MajorVersion;
+		int Minor = Target.Version.MinorVersion;
+
+		// UDeveloperSettings lives in its own module from 4.26 on.
+		if (Major >= 5 || Minor >= 26)
+		{
+			PrivateDependencyModuleNames.Add("DeveloperSettings");
+		}
+
+		// FEditorStyle (EditorStyle module) before 5.1, FAppStyle (SlateCore) after.
+		if (Major < 5 || (Major == 5 && Minor < 1))
+		{
+			PrivateDependencyModuleNames.Add("EditorStyle");
+		}
 	}
 }

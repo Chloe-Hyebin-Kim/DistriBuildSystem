@@ -219,9 +219,14 @@ def expand_response_files(argv, windows, cwd, depth=0):
 
 # --------------------------------------------------------------------------- compilers
 
+def base_name(path):
+    """File name of a Windows or POSIX path, whatever OS this runs on."""
+    return re.split(r"[\\/]", path)[-1]
+
+
 def compiler_family(path):
     """'msvc' for cl/clang-cl style drivers, 'gnu' for gcc/clang, None otherwise."""
-    name = os.path.basename(path).lower()
+    name = base_name(path).lower()
     if name.endswith(".exe"):
         name = name[:-4]
     if name in ("cl", "clang-cl") or name.endswith("-clang-cl"):

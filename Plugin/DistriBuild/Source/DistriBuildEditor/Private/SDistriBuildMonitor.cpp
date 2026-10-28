@@ -2,7 +2,8 @@
 
 #include "ISettingsModule.h"
 #include "Modules/ModuleManager.h"
-#include "Styling/AppStyle.h"
+#include "DistriBuildEditorCompat.h"
+#include "Styling/CoreStyle.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
@@ -119,7 +120,7 @@ void SDistriBuildMonitor::Construct(const FArguments& InArgs)
 				+ SVerticalBox::Slot().AutoHeight()
 				[
 					SNew(STextBlock)
-					.Font(FAppStyle::GetFontStyle("HeadingExtraSmall"))
+					.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
 					.Text(this, &SDistriBuildMonitor::GetSummaryText)
 				]
 				+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
@@ -154,7 +155,7 @@ void SDistriBuildMonitor::Construct(const FArguments& InArgs)
 		+ SVerticalBox::Slot().FillHeight(1.0f).Padding(8.0f, 0.0f, 8.0f, 8.0f)
 		[
 			SNew(SBorder)
-			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(DISTRIBUILD_STYLE::GetBrush("ToolPanel.GroupBorder"))
 			[
 				SAssignNew(List, SListView<FItem>)
 				.ListItemsSource(&Items)
@@ -227,9 +228,20 @@ FText SDistriBuildMonitor::GetStatsText() const
 {
 	const double TotalJobs = double(Stats.RemoteSucceeded + Stats.LocalExecuted);
 	const double RemoteShare = TotalJobs > 0.0 ? 100.0 * double(Stats.RemoteSucceeded) / TotalJobs : 0.0;
-	return FText::Format(LOCTEXT("Stats", "Queued {0}  Running {1}  |  Remote OK {2} ({3}%)  Remote failed {4}  Local {5}  |  Sent {6}  Received {7}"),
-		Stats.Queued, Stats.Running, Stats.RemoteSucceeded, FText::AsNumber(FMath::RoundToInt(RemoteShare)),
-		Stats.RemoteFailed, Stats.LocalExecuted, FText::AsMemory(Stats.BytesSent), FText::AsMemory(Stats.BytesReceived));
+	FFormatNamedArguments Args;
+	Args.Add(TEXT("Queued"), Stats.Queued);
+	Args.Add(TEXT("Running"), Stats.Running);
+	Args.Add(TEXT("RemoteOk"), Stats.RemoteSucceeded);
+	Args.Add(TEXT("Share"), FText::AsNumber(FMath::RoundToInt(RemoteShare)));
+	Args.Add(TEXT("RemoteFailed"), Stats.RemoteFailed);
+	Args.Add(TEXT("Local"), Stats.LocalExecuted);
+	Args.Add(TEXT("NoAgent"), Stats.LocalNoAgent);
+	Args.Add(TEXT("AfterFailure"), Stats.LocalAfterRemoteFailure);
+	Args.Add(TEXT("Sent"), FText::AsMemory(Stats.BytesSent));
+	Args.Add(TEXT("Received"), FText::AsMemory(Stats.BytesReceived));
+	return FText::Format(LOCTEXT("Stats",
+		"Queued {Queued}  Running {Running}  |  Remote OK {RemoteOk} ({Share}%)  Remote failed attempts {RemoteFailed}  |  "
+		"Local {Local} (no free agent {NoAgent}, after remote failure {AfterFailure})  |  Sent {Sent}  Received {Received}"), Args);
 }
 
 #undef LOCTEXT_NAMESPACE

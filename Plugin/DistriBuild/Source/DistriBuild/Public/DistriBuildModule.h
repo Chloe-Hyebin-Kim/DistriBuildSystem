@@ -28,6 +28,12 @@ struct FDistriBuildStats
 	int64 RemoteSucceeded = 0;
 	int64 RemoteFailed = 0;
 	int64 LocalExecuted = 0;
+	/** Breakdown of LocalExecuted: no compatible agent had a free slot. */
+	int64 LocalNoAgent = 0;
+	/** Breakdown of LocalExecuted: an agent tried and failed (network, crash, version mismatch). */
+	int64 LocalAfterRemoteFailure = 0;
+	/** Breakdown of LocalExecuted: DistriBuild disabled in settings. */
+	int64 LocalDisabled = 0;
 	int64 BytesSent = 0;
 	int64 BytesReceived = 0;
 	int32 Queued = 0;

@@ -25,8 +25,12 @@ distribuild_client.json next to the executable.
   "retry_remote_failures_locally": true,
   "connect_timeout": 3,
   "job_timeout": 600,
-  "verbose": false
+  "verbose": false,            # print why each eligible task ran locally
+  "report_dir": ""             # default ~/.distribuild: last_build.csv, last_tasks.xml, analysis.csv
 }
+
+`xgConsole --analyze <TaskFile.xml>` lists what can and cannot be distributed without building.
+UBT's task file from the last build is kept as ~/.distribuild/last_tasks.xml for that purpose.
 $DISTRIBUILD_AGENTS ("host:port,host") overrides "agents"; $DISTRIBUILD_DISABLE=1 forces local only.
 """
 
@@ -43,7 +47,7 @@ import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 
-from common import (DISCOVERY_PORT, IS_WINDOWS, compiler_family, compiler_id, discover_agents,
+from common import (DISCOVERY_PORT, IS_WINDOWS, base_name, compiler_family, compiler_id, discover_agents,
                     expand_response_files, join_cmdline, parse_agent_address, recv_frame, send_frame,
                     split_cmdline)
 
@@ -181,6 +185,10 @@ class AgentPool:
 
 # --------------------------------------------------------------------------- compile analysis
 
+class Unsupported(Exception):
+    """A compile that must run locally; the message says why (shown in reports)."""
+
+
 class CompileJob:
     """Split of one compiler invocation into a local preprocess step and a remote compile step."""
     family = None
@@ -219,7 +227,7 @@ def analyze_msvc(args):
                 job.source = a
                 i += 1
                 continue
-            return None
+            raise Unsupported("unexpected argument %r" % a)
         name = a[1:]
         low = name.lower()
         if low.startswith("fo"):
@@ -231,11 +239,15 @@ def analyze_msvc(args):
             continue
         if low.startswith("sourcedependencies") or low.startswith(("headerunit", "reference", "ifc", "interface",
                                                                      "exporttheader", "translateinclude")):
-            return None
-        if name.startswith(("Yc", "clr", "ZW")) or (low.startswith("analyze") and not low.startswith("analyze-")):
-            return None
+            raise Unsupported("C++20 modules / header units (%s)" % a)
+        if name.startswith("Yc"):
+            raise Unsupported("creates a precompiled header (/Yc)")
+        if name.startswith(("clr", "ZW")):
+            raise Unsupported("managed / WinRT compile (%s)" % a)
+        if low.startswith("analyze") and not low.startswith("analyze-"):
+            raise Unsupported("static analysis (/analyze)")
         if name in ("P", "E", "EP") or name.startswith(("Fa", "FA", "Fe", "Fi", "Fm", "FR", "Fr", "Fx", "doc")):
-            return None
+            raise Unsupported("extra output file (%s)" % a[:4])
         if name.startswith(("Yu", "Fp", "Fd", "MP")) or name == "FS":  # PCH / PDB / parallelism
             i += 1
             continue
@@ -275,8 +287,10 @@ def analyze_msvc(args):
         rem.append(a)
         i += 1
 
-    if not (compile_only and job.source and job.output):
-        return None
+    if not compile_only:
+        raise Unsupported("not a compile-only (/c) invocation")
+    if not (job.source and job.output):
+        raise Unsupported("no single source file / output object")
     if job.output.endswith(("\\", "/")):
         job.output = os.path.join(job.output, os.path.splitext(os.path.basename(job.source))[0] + ".obj")
     is_c = force_c or (not force_cpp and job.source.lower().endswith(C_EXT))
@@ -306,7 +320,7 @@ def analyze_gnu(args):
                 job.source = a
                 i += 1
                 continue
-            return None
+            raise Unsupported("unexpected argument %r" % a)
         if a == "-o":
             job.output = args[i + 1] if i + 1 < len(args) else None
             i += 2
@@ -317,7 +331,7 @@ def analyze_gnu(args):
             continue
         if a in ("-E", "-S", "-M", "-MM", "-MJ", "-save-temps") or a.startswith(
                 ("-save-temps=", "-ftime-trace", "--serialize-diagnostics", "-fmodules", "-fprofile-use=")):
-            return None
+            raise Unsupported("unsupported flag %s" % a)
         if a == "-x":
             lang = args[i + 1] if i + 1 < len(args) else None
             pre.extend(args[i:i + 2])
@@ -367,15 +381,17 @@ def analyze_gnu(args):
         rem.append(a)
         i += 1
 
-    if not (compile_only and job.source and job.output):
-        return None
+    if not compile_only:
+        raise Unsupported("not a compile-only (-c) invocation")
+    if not (job.source and job.output):
+        raise Unsupported("no single source file / output object")
     ext = os.path.splitext(job.source)[1].lower()
     if lang in ("c", "c-header"):
         out_lang = "cpp-output"
     elif lang in ("c++", "c++-header"):
         out_lang = "c++-cpp-output"
     elif lang:
-        return None
+        raise Unsupported("language %s" % lang)
     elif ext in OBJC_EXT:
         out_lang = OBJC_EXT[ext]
     else:
@@ -397,6 +413,18 @@ def write_msvc_depfile(path, source, includes):
         json.dump(data, f, indent=1)
 
 
+def write_dependency_list(path, includes):
+    """cl-filter's -dependencies file (UE 4.x): one included file per line."""
+    seen, lines = set(), []
+    for inc in includes:
+        key = os.path.normcase(os.path.normpath(inc))
+        if key not in seen:
+            seen.add(key)
+            lines.append(inc)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+
+
 # --------------------------------------------------------------------------- build graph
 
 class Task:
@@ -410,6 +438,11 @@ class Task:
         self.allow_remote = tool.get("AllowRemote", "").lower() == "true"
         self.dependents = []
         self.remaining = 0
+        self.where = ""
+        self.reason = ""
+        self.eligible = False
+        self.seconds = 0.0
+        self.code = None
 
 
 def load_tasks(xml_path):
@@ -442,7 +475,6 @@ class Builder:
         self.finished = 0
         self.failed = []
         self.aborted = False
-        self.stats = {"local": 0, "remote": 0, "remote_fallback": 0}
         self.pending_threads = 0
         self.ids = {}
 
@@ -476,24 +508,51 @@ class Builder:
             self.ids[path] = compiler_id(path) if compiler_family(path) else None
         return self.ids[path]
 
-    def try_remote(self, task):
-        """Returns (exit_code, output, agent_name) or None when the task should run locally."""
-        family = compiler_family(task.tool_path)
-        if not (task.allow_remote and family):
-            return None
-        cid = self.compiler_id_for(task.tool_path)
-        if not cid or self.pool.capacity(cid) == 0:
-            return None
+    def plan_remote(self, task):
+        """Static check: can this task run on an agent at all? Returns (plan, None) or (None, reason).
+        Agent availability is not considered here (see try_remote), so --analyze can use it offline."""
+        if not task.allow_remote:
+            return None, "not marked remote-safe by UBT (AllowRemote=False: link, PCH, codegen, ...)"
+        plan = {"compiler": task.tool_path, "params": split_cmdline(task.params, windows=IS_WINDOWS),
+                "dep_txt": None, "echo_includes": True}
+        tool_name = base_name(task.tool_path).lower()
+        if tool_name in ("cl-filter.exe", "cl-filter"):
+            # UE 4.x: cl-filter.exe -dependencies=X.txt -compiler=cl.exe -stderronly -- cl.exe @rsp /showIncludes
+            params = plan["params"]
+            if "--" not in params or params.index("--") + 1 >= len(params):
+                return None, "cl-filter command line without '-- <compiler>'"
+            sep = params.index("--")
+            for opt in params[:sep]:
+                if opt.lower().startswith("-dependencies="):
+                    plan["dep_txt"] = opt.split("=", 1)[1]
+            plan["compiler"] = params[sep + 1]
+            plan["params"] = params[sep + 2:]
+            plan["echo_includes"] = False  # cl-filter swallows the /showIncludes notes
+        family = compiler_family(plan["compiler"])
+        if not family:
+            return None, "tool is not a supported compiler (%s)" % base_name(plan["compiler"])
         try:
-            argv = expand_response_files(split_cmdline(task.params, windows=IS_WINDOWS), IS_WINDOWS, task.cwd)
-        except OSError:
-            return None
-        job = analyze_msvc(argv) if family == "msvc" else analyze_gnu(argv)
-        if job is None:
-            return None
+            argv = expand_response_files(plan["params"], IS_WINDOWS, task.cwd)
+        except OSError as e:
+            return None, "cannot read response file (%s)" % e
+        try:
+            job = analyze_msvc(argv) if family == "msvc" else analyze_gnu(argv)
+        except Unsupported as e:
+            return None, str(e)
+        plan["family"], plan["job"] = family, job
+        return plan, None
+
+    def try_remote(self, task, plan):
+        """Returns ((exit_code, output, agent_name), None) or (None, reason to run locally)."""
+        family, job = plan["family"], plan["job"]
+        cid = self.compiler_id_for(plan["compiler"])
+        if not cid:
+            return None, "cannot identify compiler version of %s" % plan["compiler"]
+        if self.pool.capacity(cid) == 0:
+            return None, "no agent has this exact compiler (%s)" % cid
         lease = self.pool.acquire(cid)
         if lease is None:
-            return None
+            return None, "all agents with this compiler were busy"
         agent, sock = lease
         ok = False
         tmp = tempfile.mkdtemp(prefix="dbld_")
@@ -501,14 +560,14 @@ class Builder:
             ipath = os.path.join(tmp, "src.i")
             env = dict(os.environ, VSLANG="1033")
             if family == "msvc":
-                cmd = [task.tool_path] + job.pre_args + ["/P", "/Fi" + ipath, "/showIncludes"]
+                cmd = [plan["compiler"]] + job.pre_args + ["/P", "/Fi" + ipath, "/showIncludes"]
             else:
-                cmd = [task.tool_path] + job.pre_args + ["-o", ipath]
+                cmd = [plan["compiler"]] + job.pre_args + ["-o", ipath]
             with self.pre_sem:
                 p = subprocess.run(cmd, cwd=task.cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, env=env)
             if p.returncode != 0 or not os.path.isfile(ipath):
-                return None  # local compile reports the real error
+                return None, "local preprocessing failed (the local compile shows the real error)"
             includes, notes = [], []
             for line in (p.stdout + p.stderr).decode("utf-8", "replace").splitlines():
                 m = INCLUDE_NOTE.match(line)
@@ -527,13 +586,11 @@ class Builder:
             # cl echoes the input file name; drop that line, keep diagnostics (they carry #line paths)
             text = "\n".join(l for l in text.splitlines() if l.strip() not in ("src.i", "")) + "\n"
             if not resp.get("ok") or resp.get("exit_code") != 0 or result is None:
-                if self.cfg["verbose"]:
-                    with self.print_lock:
-                        print("DistriBuild: remote compile of %s on %s failed (%s), retrying locally"
-                              % (task.caption, agent.name, resp.get("reason") or "exit %s" % resp.get("exit_code")))
+                reason = "remote run on %s failed (%s)" % (
+                    agent.name, resp.get("reason") or "exit code %s" % resp.get("exit_code"))
                 if self.cfg["retry_remote_failures_locally"] or not resp.get("ok"):
-                    return None
-                return resp.get("exit_code") or 1, text, agent.name
+                    return None, reason
+                return (resp.get("exit_code") or 1, text, agent.name), None
 
             out_dir = os.path.dirname(os.path.abspath(os.path.join(task.cwd, job.output)))
             os.makedirs(out_dir, exist_ok=True)
@@ -541,31 +598,35 @@ class Builder:
                 f.write(result)
             if family == "msvc" and job.depfile:
                 write_msvc_depfile(os.path.join(task.cwd, job.depfile), os.path.join(task.cwd, job.source), includes)
-            if job.show_includes:
+            if plan["dep_txt"]:
+                write_dependency_list(os.path.join(task.cwd, plan["dep_txt"]), includes)
+            if job.show_includes and plan["echo_includes"]:
                 text = "\n".join(notes) + "\n" + text
             ok = True
-            return 0, text, agent.name
+            return (0, text, agent.name), None
         except (OSError, ValueError, ConnectionError) as e:
-            if self.cfg["verbose"]:
-                with self.print_lock:
-                    print("DistriBuild: agent %s error (%s), retrying locally" % (agent.name, e))
-            return None
+            return None, "network/agent error on %s (%s)" % (agent.name, e)
         finally:
             self.pool.release(agent, sock, ok)
             shutil.rmtree(tmp, ignore_errors=True)
 
     def execute(self, task):
-        code, text, where = 1, "", "local"
+        code, text, where = 1, "", ""
+        plan, reason = None, ""
+        t0 = time.time()
         try:
-            got_local = self.cfg["local_first"] and self.local_sem.acquire(blocking=False)
+            plan, reason = self.plan_remote(task)
+            got_local = False
             result = None
-            if not got_local:
-                result = self.try_remote(task)
-                if result is None and task.allow_remote and compiler_family(task.tool_path):
-                    self.count("remote_fallback")
+            if plan is not None:
+                got_local = self.cfg["local_first"] and self.local_sem.acquire(blocking=False)
+                if got_local:
+                    reason = "local core was free (local_first)"
+                else:
+                    result, reason = self.try_remote(task, plan)
             if result is not None:
                 code, text, where = result
-                self.count("remote")
+                reason = ""
             else:
                 if not got_local:
                     self.local_sem.acquire()
@@ -573,18 +634,19 @@ class Builder:
                     code, text = self.run_local(task)
                 finally:
                     self.local_sem.release()
-                self.count("local")
-                where = ""
+            if self.cfg["verbose"] and reason and plan is not None:
+                text = "DistriBuild: ran locally - %s\n%s" % (reason, text)
         except Exception as e:  # never leave the graph hanging
-            code, text = 1, "DistriBuild internal error: %r\n" % (e,)
+            code, text, reason = 1, "DistriBuild internal error: %r\n" % (e,), "internal error"
+        task.where = where or "local"
+        task.reason = reason or ""
+        task.eligible = plan is not None
+        task.seconds = time.time() - t0
+        task.code = code
         self.emit(task, where, code, text)
         self.complete(task, code == 0)
 
     # ---------------------------------------------------------------- scheduling
-
-    def count(self, key):
-        with self.state_lock:
-            self.stats[key] += 1
 
     def start(self, task):
         with self.state_lock:
@@ -627,13 +689,81 @@ class Builder:
         return 1 if self.failed or skipped else 0
 
 
+def report_dir(cfg):
+    path = cfg.get("report_dir") or os.path.join(os.path.expanduser("~"), ".distribuild")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def short_reason(reason):
+    """Groups reasons that differ only in details (agent name, flag value) for the summary."""
+    return re.sub(r"\s*\(.*\)$", "", reason) if reason.startswith(("remote run on", "network/agent error")) else reason
+
+
+def print_summary(tasks, title):
+    groups = {}
+    for t in tasks:
+        if t.where == "local":
+            key = ("eligible" if t.eligible else "structural", short_reason(t.reason) or "-")
+            groups[key] = groups.get(key, 0) + 1
+    remote = sum(1 for t in tasks if t.where not in ("", "local"))
+    print("DistriBuild: %s" % title)
+    print("  remote: %d   local: %d   skipped/not run: %d" % (
+        remote, sum(groups.values()), sum(1 for t in tasks if not t.where)))
+    for kind, label in (("structural", "cannot be distributed"), ("eligible", "could be distributed but ran locally")):
+        items = sorted(((n, r) for (k, r), n in groups.items() if k == kind), reverse=True)
+        if items:
+            print("  %s:" % label)
+            for n, r in items:
+                print("    %5d  %s" % (n, r))
+
+
+def write_report(tasks, path):
+    import csv
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["task", "ran_on", "remote_eligible", "reason_local", "seconds", "exit_code", "tool"])
+        for t in tasks:
+            w.writerow([t.caption, t.where or "not run", "yes" if t.eligible else "no", t.reason,
+                        "%.2f" % t.seconds, "" if t.code is None else t.code, base_name(t.tool_path)])
+
+
+def analyze(xml_path, cfg):
+    """--analyze: classify every task of a task file without building anything."""
+    tasks = load_tasks(xml_path)
+    builder = Builder(tasks, cfg, None, False)
+    for t in tasks:
+        plan, reason = builder.plan_remote(t)
+        t.eligible = plan is not None
+        t.where = "local"
+        t.reason = "" if plan else reason
+    eligible = sum(1 for t in tasks if t.eligible)
+    print("DistriBuild analysis of %s" % xml_path)
+    print("  %d tasks, %d can run on agents, %d always run locally" % (len(tasks), eligible, len(tasks) - eligible))
+    groups = {}
+    for t in tasks:
+        if not t.eligible:
+            groups.setdefault(t.reason, []).append(t.caption)
+    for reason, captions in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        print("  %5d  %s" % (len(captions), reason))
+        for c in captions[:5]:
+            print("           e.g. %s" % c)
+    path = os.path.join(report_dir(cfg), "analysis.csv")
+    write_report(tasks, path)
+    print("  per-task list: %s" % path)
+    return 0
+
+
 def main(argv):
     xml_path = None
     stop_on_errors = False
+    analyze_only = False
     for a in argv[1:]:
         low = a.lower()
         if low == "/stoponerrors":
             stop_on_errors = True
+        elif low in ("--analyze", "/analyze"):
+            analyze_only = True
         elif low.endswith(".xml") or (not a.startswith("/") and os.path.isfile(a)):
             xml_path = a
         elif low in ("/?", "/help", "--help"):
@@ -641,9 +771,18 @@ def main(argv):
             return 0
     if not xml_path:
         print("usage: xgConsole <TaskFile.xml> [/StopOnErrors] [other XGE flags are ignored]")
+        print("       xgConsole --analyze <TaskFile.xml>   (what can / cannot be distributed, no build)")
         return 1
 
     cfg = load_config()
+    if analyze_only:
+        return analyze(xml_path, cfg)
+
+    out_dir = report_dir(cfg)
+    try:
+        shutil.copyfile(xml_path, os.path.join(out_dir, "last_tasks.xml"))
+    except OSError:
+        pass
     tasks = load_tasks(xml_path)
     t0 = time.time()
     pool = AgentPool(cfg)
@@ -653,9 +792,13 @@ def main(argv):
     sys.stdout.flush()
     builder = Builder(tasks, cfg, pool, stop_on_errors)
     code = builder.run()
-    s = builder.stats
-    print("DistriBuild: finished in %.1fs - %d local, %d remote, %d remote-eligible ran locally"
-          % (time.time() - t0, s["local"], s["remote"], s["remote_fallback"]))
+    print_summary(tasks, "finished in %.1fs" % (time.time() - t0))
+    report = os.path.join(out_dir, "last_build.csv")
+    try:
+        write_report(tasks, report)
+        print("  per-task report: %s" % report)
+    except OSError as e:
+        print("  could not write report %s: %s" % (report, e))
     return code
 
 

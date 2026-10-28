@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "DistributedBuildControllerInterface.h"
+#include "DistriBuildCompat.h"
 #include "DistriBuildAgentPool.h"
 #include "DistriBuildConfig.h"
 #include "DistriBuildModule.h"
@@ -20,13 +21,15 @@ class FDistriBuildController : public IDistributedBuildController
 {
 public:
 	FDistriBuildController(FDistriBuildAgentPool& InPool, const FDistriBuildConfig& InConfig);
-	virtual ~FDistriBuildController() override;
+	virtual ~FDistriBuildController();
 
-	// IDistributedBuildController
-	virtual bool SupportsDynamicReloading() override { return false; }
+	// IDistributedBuildController. Return types come from the engine header (see DistriBuildCompat.h).
+	// Members without `override` do not exist in every engine version.
+	virtual bool SupportsDynamicReloading() { return false; }
 	virtual void InitializeController() override;
-	virtual bool IsSupported() override;
-	virtual const FString GetName() override { return TEXT("DistriBuild"); }
+	virtual DistriBuildCompat::FIsSupportedReturn IsSupported() override;
+	virtual DistriBuildCompat::FGetNameReturn GetName() override { return TEXT("DistriBuild"); }
+	virtual FString CreateUniqueFilePath();
 	virtual TFuture<FDistributedBuildTaskResult> EnqueueTask(const FTaskCommandData& CommandData) override;
 
 	void ApplyConfig(const FDistriBuildConfig& InConfig);
@@ -61,6 +64,11 @@ private:
 	std::atomic<int64> RemoteSucceeded { 0 };
 	std::atomic<int64> RemoteFailed { 0 };
 	std::atomic<int64> LocalExecuted { 0 };
+	std::atomic<int64> LocalNoAgent { 0 };
+	std::atomic<int64> LocalAfterRemoteFailure { 0 };
+	std::atomic<int64> LocalDisabled { 0 };
+	std::atomic<uint32> NextFileId { 0 };
+	FString TransferDirectory;
 	std::atomic<int64> BytesSent { 0 };
 	std::atomic<int64> BytesReceived { 0 };
 	std::atomic<int64> RemoteMilliseconds { 0 };

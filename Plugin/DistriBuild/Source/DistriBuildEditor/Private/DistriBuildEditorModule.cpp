@@ -3,7 +3,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "Modules/ModuleManager.h"
-#include "Styling/AppStyle.h"
+#include "DistriBuildEditorCompat.h"
 #include "ToolMenus.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "WorkspaceMenuStructure.h"
@@ -26,7 +26,7 @@ public:
 			.SetDisplayName(LOCTEXT("TabTitle", "DistriBuild Monitor"))
 			.SetTooltipText(LOCTEXT("TabTooltip", "Distributed build agents and statistics"))
 			.SetGroup(WorkspaceMenu::GetMenuStructure().GetDeveloperToolsMiscCategory())
-			.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Settings"));
+			.SetIcon(FSlateIcon(DISTRIBUILD_STYLE_SET_NAME, DISTRIBUILD_ICON));
 
 		UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this, &FDistriBuildEditorModule::RegisterMenus));
 	}
@@ -45,14 +45,14 @@ private:
 	void RegisterMenus()
 	{
 		FToolMenuOwnerScoped OwnerScoped(this);
-		UToolMenu* Toolbar = UToolMenus::Get()->ExtendMenu("LevelEditor.LevelEditorToolBar.User");
+		UToolMenu* Toolbar = UToolMenus::Get()->ExtendMenu(DISTRIBUILD_TOOLBAR_MENU);
 		FToolMenuSection& Section = Toolbar->FindOrAddSection("DistriBuild");
 		Section.AddEntry(FToolMenuEntry::InitToolBarButton(
 			"DistriBuildMonitor",
 			FUIAction(FExecuteAction::CreateLambda([]() { FGlobalTabmanager::Get()->TryInvokeTab(DistriBuildTabName); })),
 			LOCTEXT("ToolbarLabel", "DistriBuild"),
 			LOCTEXT("ToolbarTooltip", "Open the DistriBuild monitor"),
-			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Settings")));
+			FSlateIcon(DISTRIBUILD_STYLE_SET_NAME, DISTRIBUILD_ICON)));
 	}
 };
 

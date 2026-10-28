@@ -14,14 +14,12 @@
 		{
 			"Name": "DistriBuild",
 			"Type": "Editor",
-			"LoadingPhase": "PostConfigInit",
-			"PlatformAllowList": [ "Win64", "Linux", "Mac" ]
+			"LoadingPhase": "PostConfigInit"
 		},
 		{
 			"Name": "DistriBuildEditor",
 			"Type": "Editor",
-			"LoadingPhase": "Default",
-			"PlatformAllowList": [ "Win64", "Linux", "Mac" ]
+			"LoadingPhase": "Default"
 		}
 	]
 }

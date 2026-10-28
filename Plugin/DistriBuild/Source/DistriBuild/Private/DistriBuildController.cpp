@@ -1,6 +1,7 @@
 #include "DistriBuildController.h"
 
 #include "DistriBuildProtocol.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -49,6 +50,9 @@ FDistriBuildController::FDistriBuildController(FDistriBuildAgentPool& InPool, co
 	: Pool(InPool)
 	, Config(InConfig)
 {
+	TransferDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectIntermediateDir() / TEXT("DistriBuild")
+		/ FString::Printf(TEXT("%u"), FPlatformProcess::GetCurrentProcessId()));
+	IFileManager::Get().MakeDirectory(*TransferDirectory, true);
 }
 
 FDistriBuildController::~FDistriBuildController()
@@ -65,6 +69,10 @@ void FDistriBuildController::Shutdown()
 		Workers = nullptr;
 	}
 	bInitialized = false;
+	if (!TransferDirectory.IsEmpty())
+	{
+		IFileManager::Get().DeleteDirectory(*TransferDirectory, false, true);
+	}
 }
 
 FDistriBuildConfig FDistriBuildController::GetConfig() const
@@ -84,7 +92,7 @@ FString FDistriBuildController::GetEngineKey() const
 	return GetConfig().GetEngineKey();
 }
 
-bool FDistriBuildController::IsSupported()
+DistriBuildCompat::FIsSupportedReturn FDistriBuildController::IsSupported()
 {
 	// Asked once while the shader compiling manager starts. Only claim support when at least
 	// one compatible agent answered; otherwise the engine keeps its normal local workers.
@@ -102,6 +110,13 @@ bool FDistriBuildController::IsSupported()
 		}
 	}
 	return bSupported;
+}
+
+FString FDistriBuildController::CreateUniqueFilePath()
+{
+	// Engine asks for job input/output paths here; any local folder works because the files are
+	// read and written by this process, then shipped to the agent under fixed names.
+	return TransferDirectory / FString::Printf(TEXT("%u.job"), ++NextFileId);
 }
 
 void FDistriBuildController::InitializeController()
@@ -136,14 +151,16 @@ FDistributedBuildTaskResult FDistriBuildController::Execute(const FTaskCommandDa
 	++Running;
 	const FDistriBuildConfig Cfg = GetConfig();
 	const FString EngineKey = Cfg.GetEngineKey();
-	const FString InputPath = ResolvePath(Command.WorkingDirectory, Command.InputFileName);
-	const FString OutputPath = ResolvePath(Command.WorkingDirectory, Command.OutputFileName);
+	const FString WorkingDirectory = DistriBuildCompat::GetWorkingDirectory(Command);
+	const FString InputPath = ResolvePath(WorkingDirectory, Command.InputFileName);
+	const FString OutputPath = ResolvePath(WorkingDirectory, Command.OutputFileName);
 
 	FDistributedBuildTaskResult Result;
 	Result.ReturnCode = -1;
 	Result.bCompleted = false;
 
 	bool bDone = false;
+	bool bTriedRemote = false;
 	for (int32 Attempt = 0; Cfg.bEnabled && Attempt < 3 && !bDone; ++Attempt)
 	{
 		TSharedPtr<FDistriBuildAgent, ESPMode::ThreadSafe> Agent = Pool.Acquire(EngineKey);
@@ -151,6 +168,7 @@ FDistributedBuildTaskResult FDistriBuildController::Execute(const FTaskCommandDa
 		{
 			break;
 		}
+		bTriedRemote = true;
 		const double Start = FPlatformTime::Seconds();
 		const EDistriBuildOutcome Outcome = RunRemote(*Agent, Command, InputPath, OutputPath, Cfg);
 		Pool.Release(Agent, Outcome);
@@ -171,6 +189,19 @@ FDistributedBuildTaskResult FDistriBuildController::Execute(const FTaskCommandDa
 
 	if (!bDone && (Cfg.bFallbackToLocal || !Cfg.bEnabled))
 	{
+		// Why this job is not distributed - shown in the monitor and by the DistriBuild.Stats command.
+		if (!Cfg.bEnabled)
+		{
+			++LocalDisabled;
+		}
+		else if (bTriedRemote)
+		{
+			++LocalAfterRemoteFailure;
+		}
+		else
+		{
+			++LocalNoAgent;
+		}
 		Result = RunLocal(Command, Cfg);
 	}
 	--Running;
@@ -225,7 +256,7 @@ EDistriBuildOutcome FDistriBuildController::RunRemote(const FDistriBuildAgent& A
 			Run->SetStringField(TEXT("type"), TEXT("run"));
 			Run->SetStringField(TEXT("kind"), TEXT("shader"));
 			Run->SetStringField(TEXT("engine"), Cfg.GetEngineKey());
-			Run->SetStringField(TEXT("args"), Command.ExtraCommandArgs);
+			Run->SetStringField(TEXT("args"), DistriBuildCompat::GetWorkerExtraArgs(Command));
 			Run->SetStringField(TEXT("input"), TEXT("job.in"));
 			Run->SetStringField(TEXT("output"), TEXT("job.out"));
 			Run->SetStringField(TEXT("caption"), FPaths::GetCleanFilename(InputPath));
@@ -261,15 +292,7 @@ EDistriBuildOutcome FDistriBuildController::RunRemote(const FDistriBuildAgent& A
 
 FDistributedBuildTaskResult FDistriBuildController::RunLocal(const FTaskCommandData& Command, const FDistriBuildConfig& Cfg)
 {
-	// Same command line the engine's own XGE controller builds for ShaderCompileWorker.
-	FString WorkingDirectory = Command.WorkingDirectory;
-	while (WorkingDirectory.EndsWith(TEXT("/")) || WorkingDirectory.EndsWith(TEXT("\\")))
-	{
-		WorkingDirectory.LeftChopInline(1);
-	}
-	const uint32 ParentPid = Command.DispatcherPID != 0 ? Command.DispatcherPID : FPlatformProcess::GetCurrentProcessId();
-	const FString Params = FString::Printf(TEXT("\"%s/\" %u 0 \"%s\" \"%s\" %s"),
-		*WorkingDirectory, ParentPid, *Command.InputFileName, *Command.OutputFileName, *Command.ExtraCommandArgs);
+	const FString Params = DistriBuildCompat::GetLocalCommandLine(Command, FPlatformProcess::GetCurrentProcessId());
 
 	const int32 MaxLocal = Cfg.GetLocalFallbackJobs();
 	for (;;)
@@ -316,6 +339,9 @@ FDistriBuildStats FDistriBuildController::GetStats() const
 	Stats.RemoteSucceeded = RemoteSucceeded;
 	Stats.RemoteFailed = RemoteFailed;
 	Stats.LocalExecuted = LocalExecuted;
+	Stats.LocalNoAgent = LocalNoAgent;
+	Stats.LocalAfterRemoteFailure = LocalAfterRemoteFailure;
+	Stats.LocalDisabled = LocalDisabled;
 	Stats.BytesSent = BytesSent;
 	Stats.BytesReceived = BytesReceived;
 	Stats.Queued = Queued;

@@ -4,6 +4,7 @@
 #include "HAL/Runnable.h"
 #include "DistriBuildConfig.h"
 #include "DistriBuildModule.h"
+#include <atomic>
 
 class FRunnableThread;
 class FEvent;
@@ -72,5 +73,5 @@ private:
 
 	FRunnableThread* Thread = nullptr;
 	FEvent* WakeEvent = nullptr;
-	TAtomic<bool> bStopping { false };
+	std::atomic<bool> bStopping { false };
 };

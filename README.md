@@ -88,9 +88,22 @@ python monitor.py --watch
 
 에이전트는 설정된 ShaderCompileWorker와 컴파일러만 실행합니다. 작업 폴더 밖을 가리키는 절대 경로, `..` 경로, 응답 파일(`@`)이 들어 있는 인자는 거부합니다. 그래도 **신뢰할 수 있는 사내 LAN에서만** 운영하고 `token`을 설정하세요. 통신은 암호화되지 않습니다.
 
+## 적용 전 체크리스트
+
+UE 4.26 / 5.8 적용 절차, 플러그인 컴파일 확인(`Tools\BuildPlugin.bat`), 분산되지 않은 작업 확인 방법은 **[CHECKLIST.md](CHECKLIST.md)** 에 정리되어 있습니다.
+
 ## 검증 상태와 한계
 
-- **검증 완료** (Linux, gcc/clang): 에이전트 검색, 슬롯 예약과 busy 처리, 토큰 인증, xgConsole 대체 도구의 의존성 그래프 실행, 원격 컴파일 → 링크, 의존성(.d) 파일, 컴파일 오류 시 로컬 재실행과 후속 작업 스킵, 스텁 SCW를 사용한 셰이더 작업 왕복. MSVC 인자 분리 로직은 UE 스타일 rsp로 단위 확인만 했습니다.
-- **미검증**: UE 플러그인 C++ 코드는 이 환경에 엔진이 없어 **컴파일해 보지 못했습니다**. 특히 `IDistributedBuildController`와 `FTaskCommandData`는 엔진 버전마다 시그니처가 조금씩 다릅니다(`GetName()` 반환형, `ExtraCommandArgs`·`DispatcherPID` 필드 등). 첫 빌드에서 에러가 나면 `Engine/Source/Developer/DistributedBuildInterface/Public/DistributedBuildControllerInterface.h`에 맞춰 `DistriBuildController.h/.cpp`를 수정하세요. 대상 버전은 UE 5.1 이상입니다(`FAppStyle` 사용).
-- Windows 실환경(cl.exe + UBT XGE 실행기)에서 처음 실행할 때는 `"verbose": true`로 원격 실패 사유를 확인하세요. 원격 컴파일이 실패해도 로컬에서 다시 실행되므로 빌드는 깨지지 않지만, 그만큼 가속 효과는 줄어듭니다.
-- Incredibuild처럼 파일 시스템을 가상화하지 않습니다. 그래서 링크, 쿠킹, 커스텀 툴은 분산되지 않습니다.
+- **검증 완료** (Linux, gcc/clang):
+  - 에이전트 검색, 슬롯 예약과 busy 처리, 토큰 인증
+  - xgConsole 대체 도구의 의존성 그래프 실행, 원격 컴파일 → 링크, 의존성(.d) 파일
+  - 4.26 `cl-filter.exe` 형식의 작업 원격 처리
+  - 컴파일 오류 시 로컬 재실행과 후속 작업 스킵
+  - 로컬 실행 이유 보고(요약 출력, CSV, `--analyze`)
+  - 스텁 SCW를 사용한 셰이더 작업 왕복
+  - 엔진 버전 호환 코드(`DistriBuildCompat.h`)를 두 가지 형태의 가짜 엔진 헤더로 C++14 컴파일한 결과
+- **미검증**:
+  - 실제 엔진(4.26 / 5.8)으로 플러그인을 빌드한 결과 → `Tools\BuildPlugin.bat`로 확인하세요
+  - Windows 실환경(cl.exe + UBT XGE 실행기)
+  - UE 5.8 UBT에 XGE 실행기가 남아 있는지 여부
+- Incredibuild처럼 파일 시스템을 가상화하지 않습니다. 그래서 링크, 쿠킹, 라이트 빌드, 커스텀 툴은 분산되지 않습니다.

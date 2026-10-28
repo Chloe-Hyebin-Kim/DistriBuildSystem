@@ -124,7 +124,8 @@ namespace DistriBuildProtocol
 			bool bZlib = false;
 			if (In.Num() > 256)
 			{
-				int32 OutSize = FCompression::CompressMemoryBound(NAME_Zlib, In.Num());
+				// zlib's compressBound() plus slack; avoids CompressMemoryBound, which newer engines deprecate.
+				int32 OutSize = In.Num() + (In.Num() >> 12) + (In.Num() >> 14) + (In.Num() >> 25) + 64;
 				Out.SetNumUninitialized(OutSize);
 				if (FCompression::CompressMemory(NAME_Zlib, Out.GetData(), OutSize, In.GetData(), In.Num(), COMPRESS_BiasSpeed)
 					&& OutSize < In.Num())
