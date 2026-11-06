@@ -4,6 +4,7 @@
   "discovery_port": 31891,
   "token": "",
   "max_local": 0,
+  "max_preprocess": 0,
   "local_first": true,
   "retry_remote_failures_locally": true,
   "connect_timeout": 3,

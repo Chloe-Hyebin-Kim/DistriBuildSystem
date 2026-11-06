@@ -4,6 +4,8 @@ rem   Tools\BuildPlugin.bat "C:\Program Files\Epic Games\UE_4.26"
 rem   Tools\BuildPlugin.bat "C:\Program Files\Epic Games\UE_5.8"
 rem Output: Build\<engine folder name>\ (packaged plugin) and Build\<engine folder name>.log
 setlocal
+rem 4.26's RunUAT.bat runs AutomationTool.exe from the current directory.
+set "NoDefaultCurrentDirectoryInExePath="
 if "%~1"=="" (
 	echo usage: %~nx0 ^<engine root^>
 	exit /b 1

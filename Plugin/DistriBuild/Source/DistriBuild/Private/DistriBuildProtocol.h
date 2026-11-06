@@ -12,7 +12,7 @@ class FSocket;
  */
 namespace DistriBuildProtocol
 {
-	static constexpr uint32 Version = 1;
+	static constexpr uint32 Version = 2;
 	static constexpr int32 DefaultPort = 31890;
 
 	struct FBlob

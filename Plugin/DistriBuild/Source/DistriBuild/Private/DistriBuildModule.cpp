@@ -29,6 +29,9 @@ public:
 	{
 		if (Controller)
 		{
+			const FDistriBuildStats S = Controller->GetStats();
+			UE_LOG(LogDistriBuild, Display, TEXT("DistriBuild: shader jobs: %lld remote, %lld remote failures, %lld local (%lld no free agent, %lld after remote failure)"),
+				S.RemoteSucceeded, S.RemoteFailed, S.LocalExecuted, S.LocalNoAgent, S.LocalAfterRemoteFailure);
 			IModularFeatures::Get().UnregisterModularFeature(IDistributedBuildController::GetModularFeatureType(), Controller.Get());
 			Controller->Shutdown();
 		}

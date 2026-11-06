@@ -14,6 +14,7 @@ agent.json (all keys optional):
   "token": "shared-secret",
   "work_dir": "D:/DistriBuildWork",
   "job_timeout": 600,
+  "pch_cache_gb": 40,   # precompiled headers kept for C++ jobs; one UE PCH is 1-3 GB
   "engines": ["C:/Program Files/Epic Games/UE_5.4", "D:/UE5-Source"],
   "compilers": ["C:/Program Files/Microsoft Visual Studio/2022/Professional/VC/Tools/MSVC/14.38.33130/bin/Hostx64/x64/cl.exe"],
   "auto_detect": true
@@ -29,17 +30,22 @@ import re
 import shutil
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 
-from common import (DEFAULT_PORT, DISCOVERY_PORT, DISCOVERY_PROBE, IS_WINDOWS, SAFE_BLOB_NAME,
-                    compiler_family, compiler_id, log, recv_frame, send_frame, split_cmdline)
+from common import (DEFAULT_PORT, DISCOVERY_PORT, DISCOVERY_PROBE, IS_WINDOWS, SAFE_BLOB_NAME, SAFE_BUNDLE_HASH,
+                    compiler_family, compiler_id, decode_output, log, recv_file_stream, recv_frame,
+                    remap_shader_source_dirs, send_frame, split_cmdline)
 
 BIN_PLATFORM = {"Windows": "Win64", "Linux": "Linux", "Darwin": "Mac"}.get(platform.system(), "Win64")
 SCW_NAME = "ShaderCompileWorker.exe" if IS_WINDOWS else "ShaderCompileWorker"
+KEEP_SOURCE_BUNDLES = 6
+# Helper PCs are often someone's workstation; builds must not make them unresponsive.
+JOB_CREATION_FLAGS = subprocess.BELOW_NORMAL_PRIORITY_CLASS if IS_WINDOWS else 0
 
 # Paths a compile job may legitimately mention are all inside the job directory ({WORK}).
 # Anything else that looks absolute is refused so a client cannot write outside the sandbox.
@@ -119,7 +125,12 @@ class Agent:
         self.token = cfg.get("token", "")
         self.job_timeout = float(cfg.get("job_timeout", 600))
         self.work_root = cfg.get("work_dir") or os.path.join(tempfile.gettempdir(), "DistriBuildAgent")
-        os.makedirs(self.work_root, exist_ok=True)
+        self.bundle_root = os.path.join(self.work_root, "source_bundles")
+        os.makedirs(self.bundle_root, exist_ok=True)
+        self.pch_root = os.path.join(self.work_root, "pch_cache")
+        os.makedirs(self.pch_root, exist_ok=True)
+        self.pch_cache_bytes = int(float(cfg.get("pch_cache_gb", 40)) * 1024 ** 3)
+        self.uploading = set()
         auto = cfg.get("auto_detect", True)
         self.engines = detect_engines(cfg.get("engines", []), auto)
         self.compilers = detect_compilers(cfg.get("compilers", []), auto)
@@ -154,6 +165,96 @@ class Agent:
             else:
                 self.failed += 1
 
+    # ------------------------------------------------------------------ UE 4.26 shader sources
+
+    def bundle_path(self, bundle):
+        return os.path.join(self.bundle_root, bundle.lower())
+
+    def pch_path(self, key):
+        return os.path.join(self.pch_root, key.lower() + ".pch")
+
+    def claim_upload(self, key, cached_path):
+        """'have' = cached, 'upload' = this client should send it, 'wait' = another client is sending it."""
+        with self.lock:
+            if os.path.exists(cached_path):
+                return "have"
+            if key in self.uploading:
+                return "wait"
+            self.uploading.add(key)
+            return "upload"
+
+    def end_upload(self, key):
+        with self.lock:
+            self.uploading.discard(key)
+
+    def receive_pch(self, sock, key):
+        """Stores an uploaded PCH, then drops the least recently used ones over the size limit."""
+        tmp = self.pch_path(key) + ".incoming"
+        try:
+            recv_file_stream(sock, tmp)
+            os.replace(tmp, self.pch_path(key))
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        cached = [os.path.join(self.pch_root, f) for f in os.listdir(self.pch_root) if f.endswith(".pch")]
+        cached.sort(key=os.path.getmtime, reverse=True)
+        total = 0
+        for path in cached:
+            total += os.path.getsize(path)
+            if total > self.pch_cache_bytes and path != self.pch_path(key):
+                try:
+                    os.remove(path)
+                except OSError:  # a compile has it open
+                    pass
+
+    def install_bundle(self, bundle, dirs, files, blobs):
+        """Unpacks a source bundle next to the others; the final rename makes it visible atomically."""
+        tmp = tempfile.mkdtemp(prefix="incoming_", dir=self.bundle_root)
+        try:
+            for index in dirs.values():
+                os.makedirs(os.path.join(tmp, str(int(index))), exist_ok=True)
+            for entry in files:
+                parts = str(entry["path"]).replace("\\", "/").split("/")
+                if any(part in ("", ".", "..") or ":" in part for part in parts):
+                    raise ValueError("bad source path %r" % entry["path"])
+                path = os.path.join(tmp, str(int(entry["dir"])), *parts)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(blobs[entry["blob"]])
+            try:
+                os.rename(tmp, self.bundle_path(bundle))
+            except OSError:
+                if not os.path.isdir(self.bundle_path(bundle)):
+                    raise
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        cached = [os.path.join(self.bundle_root, d) for d in os.listdir(self.bundle_root) if SAFE_BUNDLE_HASH.match(d)]
+        cached.sort(key=os.path.getmtime, reverse=True)
+        for old in cached[KEEP_SOURCE_BUNDLES:]:
+            shutil.rmtree(old, ignore_errors=True)
+
+    def apply_source_bundle(self, hdr, job_path):
+        """Points a 4.26 job's shader directory mappings at the cached bundle. Returns an error or None."""
+        bundle = hdr["source_bundle"]
+        if not SAFE_BUNDLE_HASH.match(bundle):
+            return "bad source bundle name"
+        root = self.bundle_path(bundle)
+        if not os.path.isdir(root):
+            return "source bundle %s is not cached" % bundle
+        os.utime(root)
+        dirs = hdr.get("source_dirs", {})
+        with open(job_path, "rb") as f:
+            job = f.read()
+        try:
+            job = remap_shader_source_dirs(job, lambda virtual: os.path.join(root, str(int(dirs[virtual]))).replace("\\", "/"))
+        except KeyError as e:
+            return "shader directory %s is not in the source bundle" % e
+        except (struct.error, ValueError, UnicodeDecodeError) as e:
+            return "cannot read job file: %s" % e
+        with open(job_path, "wb") as f:
+            f.write(job)
+        return None
+
     # ------------------------------------------------------------------ job execution
 
     def _check_compile_args(self, family, argv):
@@ -171,10 +272,36 @@ class Agent:
                     return "absolute path in %r" % a
         return None
 
+    def _pch_args(self, hdr, key):
+        """Arguments that use a cached PCH, or a string saying why they cannot be built."""
+        if not SAFE_BUNDLE_HASH.match(key) or not os.path.isfile(self.pch_path(key)):
+            return "precompiled header %s is not cached" % key
+        os.utime(self.pch_path(key))
+        # The header name only has to match the one the PCH was created with. The compiler restores
+        # the PCH instead of opening that file, so this client path need not exist here.
+        header = str(hdr.get("pch_header", ""))
+        if not header or header.startswith("@") or ".." in re.split(r"[\\/]", header):
+            return "bad precompiled header name"
+        defines = [str(d) for d in hdr.get("defines", [])]
+        if not all(d.startswith(("/D", "/U", "-D", "-U")) for d in defines):
+            return "bad define"
+        return defines + ["/Yu" + header, "/FI" + header, "/Fp" + self.pch_path(key)]
+
     def execute(self, hdr, blobs):
         kind = hdr.get("kind")
         work = tempfile.mkdtemp(prefix="job_", dir=self.work_root)
         try:
+            source_files = hdr.get("source_files")
+            if source_files:
+                if not SAFE_BUNDLE_HASH.match(hdr.get("source_bundle", "")):
+                    return {"ok": False, "reason": "bad source bundle name", "exit_code": -1}, []
+                try:
+                    self.install_bundle(hdr["source_bundle"], hdr.get("source_dirs", {}), source_files, dict(blobs))
+                except (KeyError, ValueError, OSError) as e:
+                    return {"ok": False, "reason": "cannot install source bundle: %s" % e, "exit_code": -1}, []
+                bundled = set(entry["blob"] for entry in source_files)
+                blobs = [b for b in blobs if b[0] not in bundled]
+
             for name, data in blobs:
                 if not SAFE_BLOB_NAME.match(name):
                     return {"ok": False, "reason": "bad file name %r" % name, "exit_code": -1}, []
@@ -189,9 +316,14 @@ class Agent:
                 inp, out = hdr.get("input", ""), hdr.get("output", "")
                 if not (SAFE_BLOB_NAME.match(inp) and SAFE_BLOB_NAME.match(out)):
                     return {"ok": False, "reason": "bad shader file names", "exit_code": -1}, []
-                extra = split_cmdline(hdr.get("args", ""), windows=IS_WINDOWS)
+                if hdr.get("source_bundle"):
+                    problem = self.apply_source_bundle(hdr, os.path.join(work, inp))
+                    if problem:
+                        return {"ok": False, "reason": problem, "exit_code": -1}, []
+                extra = [a for a in split_cmdline(hdr.get("args", ""), windows=IS_WINDOWS) if a != "-xge_int"]
                 # Parent PID = this agent: SCW quits when its "parent" dies, so it lives as long as we do.
-                argv = [scw, work + os.sep, str(os.getpid()), "0", inp, out] + extra
+                # -xge_int must be the sixth argument: it makes SCW exit after this job instead of waiting for more.
+                argv = [scw, work.replace("\\", "/") + "/", str(os.getpid()), "0", inp, out, "-xge_int"] + extra
                 outputs = [out]
             elif kind == "compile":
                 cid = hdr.get("compiler", "")
@@ -203,17 +335,23 @@ class Agent:
                 if problem:
                     return {"ok": False, "reason": problem, "exit_code": -1}, []
                 argv = [exe] + [a.replace("{WORK}", work) for a in raw]
+                pch = hdr.get("pch")
+                if pch:
+                    problem = self._pch_args(hdr, pch)
+                    if isinstance(problem, str):
+                        return {"ok": False, "reason": problem, "exit_code": -1}, []
+                    argv += problem
             else:
                 return {"ok": False, "reason": "unknown job kind %r" % kind, "exit_code": -1}, []
 
             if not all(SAFE_BLOB_NAME.match(o) for o in outputs):
                 return {"ok": False, "reason": "bad output name", "exit_code": -1}, []
 
-            env = dict(os.environ, VSLANG="1033")
             t0 = time.time()
             try:
                 p = subprocess.run(argv, cwd=work, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, timeout=self.job_timeout, env=env)
+                                   stderr=subprocess.STDOUT, timeout=self.job_timeout,
+                                   creationflags=JOB_CREATION_FLAGS)
             except subprocess.TimeoutExpired:
                 return {"ok": False, "reason": "timeout", "exit_code": -1}, []
             out_blobs = []
@@ -222,7 +360,7 @@ class Agent:
                 if os.path.isfile(path):
                     with open(path, "rb") as f:
                         out_blobs.append((o, f.read()))
-            text = p.stdout.decode("utf-8", "replace").replace(work + os.sep, "").replace(work, ".")
+            text = decode_output(p.stdout).replace(work + os.sep, "").replace(work, ".")
             return {"ok": True, "exit_code": p.returncode, "stdout": text[-65536:],
                     "elapsed": round(time.time() - t0, 3), "agent": self.name}, out_blobs
         finally:
@@ -250,9 +388,29 @@ class Handler(socketserver.BaseRequestHandler):
                 send_frame(sock, {"ok": False, "reason": "busy"})
                 return
             ok = False
+            bundle, pch = hdr.get("source_bundle"), hdr.get("pch")
+            upload_key = None
             try:
-                send_frame(sock, {"ok": True, "name": agent.name})
+                key = bundle or pch
+                if key:
+                    if not SAFE_BUNDLE_HASH.match(key):
+                        send_frame(sock, {"ok": False, "reason": "bad upload key"})
+                        return
+                    state = agent.claim_upload(key, agent.bundle_path(key) if bundle else agent.pch_path(key))
+                    if state == "wait":  # the client tries another agent, or this job runs on its own machine
+                        send_frame(sock, {"ok": False, "reason": "busy" if bundle else "uploading"})
+                        return
+                    if state == "upload":
+                        upload_key = key
+                send_frame(sock, {"ok": True, "name": agent.name, "need_bundle": bool(upload_key and bundle),
+                                  "need_pch": bool(upload_key and pch)})
                 sock.settimeout(agent.job_timeout + 60)
+                if upload_key and pch:
+                    put, _ = recv_frame(sock)
+                    if put.get("type") != "pch_put":
+                        return
+                    agent.receive_pch(sock, pch)
+                    send_frame(sock, {"ok": True})
                 run_hdr, run_blobs = recv_frame(sock)
                 if run_hdr.get("type") != "run":
                     return
@@ -264,6 +422,8 @@ class Handler(socketserver.BaseRequestHandler):
                 if not resp.get("ok"):
                     log("    rejected: %s" % resp.get("reason"))
             finally:
+                if upload_key:
+                    agent.end_upload(upload_key)
                 agent.release(ok)
         except (OSError, ValueError, ConnectionError) as e:
             log("connection from %s failed: %s" % (self.client_address[0], e))

@@ -6,7 +6,7 @@
   "token": "",
   "work_dir": "D:/DistriBuildWork",
   "job_timeout": 600,
-  "engines": ["C:/Program Files/Epic Games/UE_5.4"],
+  "engines": ["C:/Program Files/Epic Games/UE_4.26", "C:/Program Files/Epic Games/UE_5.8"],
   "compilers": [],
   "auto_detect": true
 }

@@ -17,11 +17,12 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import zlib
 
 MAGIC = b"DBLD"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 DEFAULT_PORT = 31890
 DISCOVERY_PORT = 31891
 DISCOVERY_PROBE = b"DBLD?"
@@ -31,6 +32,7 @@ MAX_BLOB_BYTES = 1024 * 1024 * 1024
 
 IS_WINDOWS = os.name == "nt"
 SAFE_BLOB_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SAFE_BUNDLE_HASH = re.compile(r"^[0-9A-Fa-f]{40}$")
 
 
 # --------------------------------------------------------------------------- framing
@@ -89,6 +91,36 @@ def recv_frame(sock):
             raise ValueError("blob size mismatch for %s" % f.get("name"))
         blobs.append((f["name"], data))
     return header, blobs
+
+
+STREAM_CHUNK_BYTES = 16 * 1024 * 1024
+
+
+def send_file_stream(sock, path):
+    """Sends a file too large to hold in memory (a 2 GB .pch): zlib chunks, each with a u32 size, then 0."""
+    sent = 0
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            packed = zlib.compress(chunk, 1)
+            sock.sendall(struct.pack("<I", len(packed)))
+            sock.sendall(packed)
+            sent += len(packed) + 4
+    sock.sendall(struct.pack("<I", 0))
+    return sent
+
+
+def recv_file_stream(sock, path):
+    with open(path, "wb") as f:
+        while True:
+            size = struct.unpack("<I", recv_exact(sock, 4))[0]
+            if size == 0:
+                return
+            if size > 2 * STREAM_CHUNK_BYTES:
+                raise ValueError("stream chunk too large")
+            f.write(zlib.decompress(recv_exact(sock, size)))
 
 
 def request(host, port, header, blobs=(), timeout=5.0):
@@ -191,6 +223,15 @@ def join_cmdline(argv, windows=IS_WINDOWS):
     return subprocess.list2cmdline(argv) if windows else shlex.join(argv)
 
 
+def decode_output(raw):
+    """Tool output: UTF-8 when it is valid, otherwise the console code page cl.exe writes in."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("mbcs" if IS_WINDOWS else "latin-1", "replace")
+    return text.replace("\r\n", "\n")
+
+
 def read_text_any(path):
     with open(path, "rb") as f:
         raw = f.read()
@@ -251,12 +292,13 @@ def compiler_id(path):
     family = compiler_family(resolved)
     name = os.path.basename(resolved).lower()
     try:
-        if family == "msvc" and name.startswith("cl"):
-            env = dict(os.environ, VSLANG="1033")
+        if family == "msvc" and name in ("cl", "cl.exe"):
             p = subprocess.run([resolved], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, env=env, timeout=30)
-            banner = (p.stderr + p.stdout).decode("utf-8", "replace")
-            m = re.search(r"Version\s+([\d.]+)\s+for\s+(\S+)", banner)
+                               stderr=subprocess.PIPE, timeout=30)
+            # The banner is translated, and VSLANG has no effect without the English language pack:
+            #   Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35229 for x64
+            #   Microsoft (R) C/C++ ...컴파일러 버전 19.44.35229(x64)
+            m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)\s*(?:for\s+|\()(x64|x86|ARM64EC|ARM64|ARM)\b", decode_output(p.stderr + p.stdout))
             if m:
                 cid = "msvc-%s-%s" % (m.group(1), m.group(2))
         elif family in ("msvc", "gnu"):
@@ -278,6 +320,87 @@ def compiler_id(path):
     with _id_lock:
         _id_cache[resolved] = cid
     return cid
+
+
+# --------------------------------------------------------------------------- UE 4.26 shader jobs
+
+def _read_fstring(data, pos):
+    """FArchive << FString: i32 length including the terminator, negative for UTF-16."""
+    size = struct.unpack_from("<i", data, pos)[0]
+    pos += 4
+    if size == 0:
+        return "", pos
+    if size > 0:
+        end = pos + size
+        return data[pos:end - 1].decode("latin-1"), end
+    end = pos + -size * 2
+    return data[pos:end - 2].decode("utf-16-le"), end
+
+
+def _write_fstring(text):
+    try:
+        raw = text.encode("ascii") + b"\0"
+        return struct.pack("<i", len(raw)) + raw
+    except UnicodeEncodeError:
+        raw = text.encode("utf-16-le") + b"\0\0"
+        return struct.pack("<i", -(len(raw) // 2)) + raw
+
+
+def remap_shader_source_dirs(job, target_for_virtual_dir):
+    """Rewrites the directory mappings at the head of a UE 4.26 ShaderCompileWorker input file.
+
+    The layout is i32 InputVersion, TMap<FString, uint32> FormatVersions, TMap<FString, FString>
+    Mappings (see FShaderCompileUtilities::DoWriteTasks). The engine writes the mappings as
+    absolute paths of the machine that created the job; they must point at this machine's copy.
+    Raises KeyError for a virtual directory the callable does not know.
+    """
+    pos = 4
+    count = struct.unpack_from("<i", job, pos)[0]
+    pos += 4
+    for _ in range(count):
+        _, pos = _read_fstring(job, pos)
+        pos += 4
+    head = job[:pos]
+    count = struct.unpack_from("<i", job, pos)[0]
+    pos += 4
+    out = [head, struct.pack("<i", count)]
+    for _ in range(count):
+        key, pos = _read_fstring(job, pos)
+        _, pos = _read_fstring(job, pos)
+        out.append(_write_fstring(key))
+        out.append(_write_fstring(target_for_virtual_dir(key)))
+    out.append(job[pos:])
+    return b"".join(out)
+
+
+_include_prefixes = {}
+
+
+def msvc_include_prefix(compiler):
+    """The text before the path on a /showIncludes line, in whatever language this compiler speaks."""
+    with _id_lock:
+        if compiler in _include_prefixes:
+            return _include_prefixes[compiler]
+    prefix = "Note: including file:"
+    probe = tempfile.mkdtemp(prefix="dbld_probe_")
+    try:
+        with open(os.path.join(probe, "dbld_probe.h"), "w") as f:
+            f.write("\n")
+        with open(os.path.join(probe, "dbld_probe.cpp"), "w") as f:
+            f.write('#include "dbld_probe.h"\n')
+        p = subprocess.run([compiler, "/nologo", "/showIncludes", "/Zs", "dbld_probe.cpp"], cwd=probe, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        for line in decode_output(p.stdout).splitlines():
+            if line.lower().endswith("dbld_probe.h"):
+                at = line.lower().find(os.path.normcase(probe)[:3].lower())
+                prefix = line[:at].strip() if at > 0 else prefix
+    except (OSError, subprocess.SubprocessError):
+        pass
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    with _id_lock:
+        _include_prefixes[compiler] = prefix
+    return prefix
 
 
 def log(msg):

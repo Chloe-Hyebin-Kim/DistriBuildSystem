@@ -127,7 +127,7 @@ void FDistriBuildController::InitializeController()
 	}
 	const FDistriBuildConfig Cfg = GetConfig();
 	Workers = FQueuedThreadPool::Allocate();
-	Workers->Create(Cfg.MaxRemoteJobs, 128 * 1024, TPri_BelowNormal, TEXT("DistriBuildWorker"));
+	Workers->Create(Cfg.MaxRemoteJobs, 256 * 1024, TPri_BelowNormal, TEXT("DistriBuildWorker"));
 	bInitialized = true;
 	UE_LOG(LogDistriBuild, Display, TEXT("DistriBuild controller initialized (%d concurrent jobs)"), Cfg.MaxRemoteJobs);
 }
@@ -153,7 +153,7 @@ FDistributedBuildTaskResult FDistriBuildController::Execute(const FTaskCommandDa
 	const FString EngineKey = Cfg.GetEngineKey();
 	const FString WorkingDirectory = DistriBuildCompat::GetWorkingDirectory(Command);
 	const FString InputPath = ResolvePath(WorkingDirectory, Command.InputFileName);
-	const FString OutputPath = ResolvePath(WorkingDirectory, Command.OutputFileName);
+	const FString OutputPath = ResolvePath(WorkingDirectory, DistriBuildCompat::GetOutputFile(Command));
 
 	FDistributedBuildTaskResult Result;
 	Result.ReturnCode = -1;
@@ -168,7 +168,6 @@ FDistributedBuildTaskResult FDistriBuildController::Execute(const FTaskCommandDa
 		{
 			break;
 		}
-		bTriedRemote = true;
 		const double Start = FPlatformTime::Seconds();
 		const EDistriBuildOutcome Outcome = RunRemote(*Agent, Command, InputPath, OutputPath, Cfg);
 		Pool.Release(Agent, Outcome);
@@ -184,6 +183,7 @@ FDistributedBuildTaskResult FDistriBuildController::Execute(const FTaskCommandDa
 		else if (Outcome != EDistriBuildOutcome::Busy)
 		{
 			++RemoteFailed;
+			bTriedRemote = true;
 		}
 	}
 
@@ -220,6 +220,19 @@ EDistriBuildOutcome FDistriBuildController::RunRemote(const FDistriBuildAgent& A
 		return EDistriBuildOutcome::JobFailed;
 	}
 
+	// 4.26 jobs read shader sources from disk through absolute paths of this machine, so the sources
+	// travel as a bundle the agent caches by hash. 5.x jobs embed their preprocessed sources.
+	TSharedPtr<const FDistriBuildSourceBundle, ESPMode::ThreadSafe> Bundle;
+	if (DistriBuildCompat::bJobsReadShaderSourcesFromDisk)
+	{
+		Bundle = SourceBundler.GetForJob(Input.Data);
+		if (!Bundle.IsValid())
+		{
+			UE_LOG(LogDistriBuild, Warning, TEXT("Cannot read the shader source directories of job %s"), *InputPath);
+			return EDistriBuildOutcome::JobFailed;
+		}
+	}
+
 	FSocket* Socket = DistriBuildProtocol::Connect(Agent.Host, Agent.Port, Cfg.ConnectTimeoutSeconds);
 	if (!Socket)
 	{
@@ -237,6 +250,10 @@ EDistriBuildOutcome FDistriBuildController::RunRemote(const FDistriBuildAgent& A
 	Reserve->SetStringField(TEXT("type"), TEXT("reserve"));
 	Reserve->SetStringField(TEXT("token"), Cfg.AuthToken);
 	Reserve->SetStringField(TEXT("kind"), TEXT("shader"));
+	if (Bundle.IsValid())
+	{
+		Reserve->SetStringField(TEXT("source_bundle"), Bundle->Hash);
+	}
 	if (DistriBuildProtocol::SendFrame(Socket, Reserve, {}, &Sent)
 		&& DistriBuildProtocol::RecvFrame(Socket, Cfg.ConnectTimeoutSeconds + 5.0f, Reply, Outputs, &Received))
 	{
@@ -260,6 +277,12 @@ EDistriBuildOutcome FDistriBuildController::RunRemote(const FDistriBuildAgent& A
 			Run->SetStringField(TEXT("input"), TEXT("job.in"));
 			Run->SetStringField(TEXT("output"), TEXT("job.out"));
 			Run->SetStringField(TEXT("caption"), FPaths::GetCleanFilename(InputPath));
+			if (Bundle.IsValid())
+			{
+				bool bNeedBundle = false;
+				Reply->TryGetBoolField(TEXT("need_bundle"), bNeedBundle);
+				Bundle->AddToRunFrame(*Run, bNeedBundle, Inputs);
+			}
 
 			if (DistriBuildProtocol::SendFrame(Socket, Run, Inputs, &Sent)
 				&& DistriBuildProtocol::RecvFrame(Socket, Cfg.JobTimeoutSeconds + 30.0f, Reply, Outputs, &Received))
@@ -292,7 +315,7 @@ EDistriBuildOutcome FDistriBuildController::RunRemote(const FDistriBuildAgent& A
 
 FDistributedBuildTaskResult FDistriBuildController::RunLocal(const FTaskCommandData& Command, const FDistriBuildConfig& Cfg)
 {
-	const FString Params = DistriBuildCompat::GetLocalCommandLine(Command, FPlatformProcess::GetCurrentProcessId());
+	const FString Params = DistriBuildCompat::GetLocalCommandLine(Command);
 
 	const int32 MaxLocal = Cfg.GetLocalFallbackJobs();
 	for (;;)

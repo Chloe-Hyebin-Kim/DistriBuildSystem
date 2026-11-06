@@ -6,6 +6,7 @@
 #include "DistriBuildAgentPool.h"
 #include "DistriBuildConfig.h"
 #include "DistriBuildModule.h"
+#include "DistriBuildSourceBundle.h"
 #include <atomic>
 
 class FQueuedThreadPool;
@@ -24,18 +25,18 @@ public:
 	virtual ~FDistriBuildController();
 
 	// IDistributedBuildController. Return types come from the engine header (see DistriBuildCompat.h).
-	// Members without `override` do not exist in every engine version.
-	virtual bool SupportsDynamicReloading() { return false; }
-	virtual void InitializeController() override;
+	virtual bool SupportsDynamicReloading() override { return false; }
+	virtual void InitializeController() DISTRIBUILD_OVERRIDE_UE5;
 	virtual DistriBuildCompat::FIsSupportedReturn IsSupported() override;
 	virtual DistriBuildCompat::FGetNameReturn GetName() override { return TEXT("DistriBuild"); }
-	virtual FString CreateUniqueFilePath();
+	virtual FString CreateUniqueFilePath() override;
 	virtual TFuture<FDistributedBuildTaskResult> EnqueueTask(const FTaskCommandData& CommandData) override;
 
 	void ApplyConfig(const FDistriBuildConfig& InConfig);
 	void Shutdown();
 
-	bool IsActive() const { return bInitialized; }
+	/** The engine only asks IsSupported() when it picks a controller, and 4.26 never calls InitializeController(). */
+	bool IsActive() const { return bInitialized || bSupported; }
 	FString GetEngineKey() const;
 	FDistriBuildStats GetStats() const;
 
@@ -46,6 +47,7 @@ private:
 	EDistriBuildOutcome RunRemote(const FDistriBuildAgent& Agent, const FTaskCommandData& Command,
 		const FString& InputPath, const FString& OutputPath, const FDistriBuildConfig& Cfg);
 	FDistributedBuildTaskResult RunLocal(const FTaskCommandData& Command, const FDistriBuildConfig& Cfg);
+	FDistriBuildSourceBundler SourceBundler;
 	FDistriBuildConfig GetConfig() const;
 
 	FDistriBuildAgentPool& Pool;

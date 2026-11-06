@@ -5,7 +5,7 @@ pushd "%~dp0"
 python -m PyInstaller --onefile --console --name xgConsole xgconsole.py || goto :error
 python -m PyInstaller --onefile --console --name DistriBuildAgent agent.py || goto :error
 echo.
-echo Done. Copy dist\xgConsole.exe to a folder on PATH (e.g. C:\DistriBuild\bin).
+echo Done. On developer PCs run install_client.bat as administrator: it installs xgConsole.exe and the service UBT checks for.
 echo Copy dist\DistriBuildAgent.exe to every helper PC.
 popd
 exit /b 0

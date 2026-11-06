@@ -1,19 +1,31 @@
 #pragma once
 
-// Engine-version shims for IDistributedBuildController / FTaskCommandData.
+// Engine-version shims for IDistributedBuildController / FTaskCommandData, written against the real
+// 4.26 and 5.8 headers. The two differ in the following ways:
 //
-// The interface has drifted between engine versions (4.26 ... 5.x): return types of IsSupported()
-// and GetName() changed between `bool`/`const bool` and `FString`/`const FString`, and the task
-// struct has carried either a full `CommandArgs` string or separate `WorkingDirectory`,
-// `ExtraCommandArgs` and `DispatcherPID` fields. Everything here is resolved at compile time from
-// the engine's own header, so one source tree builds against all of them. Written in C++14 so it
-// also compiles with 4.26's default language standard.
+//                         4.26                            5.8
+//   worker arguments      CommandArgs, with -xge_int      ExtraCommandArgs, without -xge_int
+//   output file           only in CommandArgs             OutputFileName
+//   working directory     folder of InputFileName         WorkingDirectory
+//   InitializeController  does not exist, never called    pure virtual, called
+//   shader sources        read from disk via the job's    embedded in the job file
+//                         absolute directory mappings
+//
+// Both command lines start with the same positional arguments: "Dir/" ParentPID 0 "In" "Out".
+// Fields are detected at compile time from the engine's own header. Written in C++14 for 4.26.
 
 #include "CoreMinimal.h"
 #include "DistributedBuildControllerInterface.h"
 #include "Misc/Paths.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include <type_traits>
 #include <utility>
+
+#if ENGINE_MAJOR_VERSION >= 5
+	#define DISTRIBUILD_OVERRIDE_UE5 override
+#else
+	#define DISTRIBUILD_OVERRIDE_UE5
+#endif
 
 namespace DistriBuildCompat
 {
@@ -34,7 +46,7 @@ namespace DistriBuildCompat
 	DISTRIBUILD_DETECT_MEMBER(CommandArgs)
 	DISTRIBUILD_DETECT_MEMBER(ExtraCommandArgs)
 	DISTRIBUILD_DETECT_MEMBER(WorkingDirectory)
-	DISTRIBUILD_DETECT_MEMBER(DispatcherPID)
+	DISTRIBUILD_DETECT_MEMBER(OutputFileName)
 
 #undef DISTRIBUILD_DETECT_MEMBER
 
@@ -49,75 +61,86 @@ namespace DistriBuildCompat
 		template <typename T> FString WorkingDir(const T& D, std::true_type) { return D.WorkingDirectory; }
 		template <typename T> FString WorkingDir(const T& D, std::false_type) { return FPaths::GetPath(D.InputFileName); }
 
-		template <typename T> uint32 DispatcherPid(const T& D, std::true_type) { return uint32(D.DispatcherPID); }
-		template <typename T> uint32 DispatcherPid(const T&, std::false_type) { return 0; }
+		template <typename T> FString OutputFile(const T& D, std::true_type) { return D.OutputFileName; }
+		template <typename T> FString OutputFile(const T&, std::false_type) { return FString(); }
 
-		/** Text after the first Count whitespace-separated (quote-aware) tokens. */
-		inline FString SkipTokens(const FString& Text, int32 Count)
+		/** Index just past the next whitespace-separated, quote-aware token. */
+		inline int32 SkipToken(const FString& Text, int32 Index)
+		{
+			const int32 Length = Text.Len();
+			while (Index < Length && FChar::IsWhitespace(Text[Index]))
+			{
+				++Index;
+			}
+			bool bQuoted = false;
+			while (Index < Length && (bQuoted || !FChar::IsWhitespace(Text[Index])))
+			{
+				if (Text[Index] == TEXT('"'))
+				{
+					bQuoted = !bQuoted;
+				}
+				++Index;
+			}
+			return Index;
+		}
+
+		inline int32 SkipTokens(const FString& Text, int32 Count)
 		{
 			int32 Index = 0;
-			const int32 Length = Text.Len();
 			for (int32 Token = 0; Token < Count; ++Token)
 			{
-				while (Index < Length && FChar::IsWhitespace(Text[Index]))
-				{
-					++Index;
-				}
-				bool bQuoted = false;
-				while (Index < Length && (bQuoted || !FChar::IsWhitespace(Text[Index])))
-				{
-					if (Text[Index] == TEXT('"'))
-					{
-						bQuoted = !bQuoted;
-					}
-					++Index;
-				}
+				Index = SkipToken(Text, Index);
 			}
-			return Text.Mid(Index).TrimStartAndEnd();
+			return Index;
+		}
+
+		inline FString WorkerArguments(const FTaskCommandData& D)
+		{
+			const FString Full = CommandArgs(D, THasCommandArgs<FTaskCommandData>());
+			return Full.IsEmpty() ? ExtraArgs(D, THasExtraCommandArgs<FTaskCommandData>()) : Full;
 		}
 	}
+
+	/** See the table at the top of this file. */
+	static constexpr bool bJobsReadShaderSourcesFromDisk = THasCommandArgs<FTaskCommandData>::value;
 
 	inline FString GetWorkingDirectory(const FTaskCommandData& D)
 	{
 		return Private::WorkingDir(D, THasWorkingDirectory<FTaskCommandData>());
 	}
 
-	inline uint32 GetDispatcherPid(const FTaskCommandData& D)
+	/** Output file as the engine named it: absolute on 5.8, relative to the working directory on 4.26. */
+	inline FString GetOutputFile(const FTaskCommandData& D)
 	{
-		return Private::DispatcherPid(D, THasDispatcherPID<FTaskCommandData>());
+		const FString Direct = Private::OutputFile(D, THasOutputFileName<FTaskCommandData>());
+		if (!Direct.IsEmpty())
+		{
+			return Direct;
+		}
+		const FString Arguments = Private::WorkerArguments(D);
+		const int32 Start = Private::SkipTokens(Arguments, 4);
+		return Arguments.Mid(Start, Private::SkipToken(Arguments, Start) - Start).TrimStartAndEnd().TrimQuotes();
+	}
+
+	/** ShaderCompileWorker arguments after the positional ones and -xge_int; the agent supplies those itself. */
+	inline FString GetWorkerExtraArgs(const FTaskCommandData& D)
+	{
+		const FString Arguments = Private::WorkerArguments(D);
+		FString Extra = Arguments.Mid(Private::SkipTokens(Arguments, 5)).TrimStartAndEnd();
+		if (Extra.StartsWith(TEXT("-xge_int")))
+		{
+			Extra = Extra.Mid(8).TrimStart();
+		}
+		return Extra;
 	}
 
 	/**
-	 * ShaderCompileWorker arguments after the five positional ones
-	 * (WorkingDir/ ParentPID ThreadId Input Output), e.g. "-xge_int -subprocess-args...".
+	 * Full command line for running the task on this machine. -xge_int must be the sixth argument:
+	 * without it ShaderCompileWorker waits for further jobs after the first instead of exiting.
 	 */
-	inline FString GetWorkerExtraArgs(const FTaskCommandData& D)
+	inline FString GetLocalCommandLine(const FTaskCommandData& D)
 	{
-		const FString Extra = Private::ExtraArgs(D, THasExtraCommandArgs<FTaskCommandData>());
-		if (!Extra.IsEmpty())
-		{
-			return Extra;
-		}
-		const FString Full = Private::CommandArgs(D, THasCommandArgs<FTaskCommandData>());
-		return Full.IsEmpty() ? FString() : Private::SkipTokens(Full, 5);
-	}
-
-	/** Full ShaderCompileWorker command line for running the task on this machine. */
-	inline FString GetLocalCommandLine(const FTaskCommandData& D, uint32 FallbackPid)
-	{
-		const FString Full = Private::CommandArgs(D, THasCommandArgs<FTaskCommandData>());
-		if (!Full.IsEmpty())
-		{
-			return Full;
-		}
-		FString WorkingDirectory = GetWorkingDirectory(D);
-		while (WorkingDirectory.EndsWith(TEXT("/")) || WorkingDirectory.EndsWith(TEXT("\\")))
-		{
-			WorkingDirectory = WorkingDirectory.LeftChop(1);
-		}
-		const uint32 Pid = GetDispatcherPid(D) != 0 ? GetDispatcherPid(D) : FallbackPid;
-		return FString::Printf(TEXT("\"%s/\" %u 0 \"%s\" \"%s\" %s"), *WorkingDirectory, Pid,
-			*FPaths::GetCleanFilename(D.InputFileName), *FPaths::GetCleanFilename(D.OutputFileName),
-			*Private::ExtraArgs(D, THasExtraCommandArgs<FTaskCommandData>()));
+		const FString Arguments = Private::WorkerArguments(D);
+		return FString::Printf(TEXT("%s -xge_int %s"), *Arguments.Left(Private::SkipTokens(Arguments, 5)), *GetWorkerExtraArgs(D));
 	}
 }

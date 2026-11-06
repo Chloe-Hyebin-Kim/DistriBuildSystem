@@ -13,7 +13,7 @@
 	"Modules": [
 		{
 			"Name": "DistriBuild",
-			"Type": "Editor",
+			"Type": "UncookedOnly",
 			"LoadingPhase": "PostConfigInit"
 		},
 		{
