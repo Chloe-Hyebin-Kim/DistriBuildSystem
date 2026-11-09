@@ -156,9 +156,9 @@ class Project:
 
     COUNT = 6
 
-    def __init__(self, root, ue5, cl, link, cl_filter, debug_flag="/Z7", broken=False):
+    def __init__(self, root, ue5, cl, link, cl_filter, debug_flag="/Z7", broken=False, relative_pch=False):
         self.root, self.ue5, self.cl, self.link, self.cl_filter = root, ue5, cl, link, cl_filter
-        self.debug_flag, self.broken = debug_flag, broken
+        self.debug_flag, self.broken, self.relative_pch = debug_flag, broken, relative_pch
         self.src = os.path.join(root, "Source", "모듈")  # non-ASCII on purpose: UBT reads these paths back
         self.inc = os.path.join(root, "Source", "Public")
         self.ext = os.path.join(root, "Source", "ThirdParty")
@@ -191,6 +191,8 @@ class Project:
                      '/external:I "%s"' % self.ext, "/experimental:deterministic", "/DTEST_EXTERNAL"]
         else:
             args += ["/std:c++17", '/I "%s"' % self.ext]
+        if self.relative_pch:
+            args.append('/I "."')  # /FI looks in include paths, not the working directory
         # A real module has hundreds of include paths; together they exceed a Windows command line.
         args += ['/I "%s"' % os.path.join(self.root, "Source", "Runtime", "SomeVeryLongModuleNameForPadding%04d" % i, "Public")
                  for i in range(450)]
@@ -218,6 +220,12 @@ class Project:
         pch = os.path.join(self.out, "SharedPCH.h.pch")
         pch_cpp = os.path.join(self.out, "SharedPCH.cpp")
         write_text(pch_cpp, '#include "%s"\n' % pch_h)
+        if self.relative_pch:
+            # UBT's spelling for engine and plugin modules: relative to Engine/Source, starting with "..".
+            wrapper = os.path.join(self.out, "RelativeSharedPCH.h")
+            write_text(wrapper, '#include "SharedPCH.h"\n')
+            write_text(pch_cpp, "\n")
+            pch_h = os.path.relpath(wrapper, self.cwd)
         pch_obj = os.path.join(self.out, "SharedPCH.h.obj")
         tool, params, _ = self.compile_action("SharedPCH", ['"%s"' % pch_cpp, '/Yc"%s"' % pch_h, '/Fp"%s"' % pch,
                                                             '/FI"%s"' % pch_h, '/Fo"%s"' % pch_obj])
@@ -307,7 +315,8 @@ def test_build(label, ue5, cl, link, cl_filter, env, agent_port, tmp, debug_flag
 
     # Distributed build: the PCH goes first, as it would in a real build where other compiles run
     # locally meanwhile. Then everything that can go remote must go remote.
-    project = Project(remote_root, ue5, cl, link, cl_filter, debug_flag)
+    # 5.8 runs use a relative PCH path and 4.26 runs an absolute one, so both spellings stay covered.
+    project = Project(remote_root, ue5, cl, link, cl_filter, debug_flag, relative_pch=ue5)
     xml = os.path.join(remote_root, "XGETasks.xml")
     client = {"agents": ["127.0.0.1:%d" % agent_port], "max_local": 1, "local_first": False}
     project.task_file(xml, seed_pch=True)

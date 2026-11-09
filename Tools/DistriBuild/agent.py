@@ -278,9 +278,10 @@ class Agent:
             return "precompiled header %s is not cached" % key
         os.utime(self.pch_path(key))
         # The header name only has to match the one the PCH was created with. The compiler restores
-        # the PCH instead of opening that file, so this client path need not exist here.
+        # the PCH instead of opening that file, so this client path need not exist here. UBT writes
+        # it relative to Engine/Source for engine and plugin modules, so ".." is normal.
         header = str(hdr.get("pch_header", ""))
-        if not header or header.startswith("@") or ".." in re.split(r"[\\/]", header):
+        if not header or header.startswith("@"):
             return "bad precompiled header name"
         defines = [str(d) for d in hdr.get("defines", [])]
         if not all(d.startswith(("/D", "/U", "-D", "-U")) for d in defines):
