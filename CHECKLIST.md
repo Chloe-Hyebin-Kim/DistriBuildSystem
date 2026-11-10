@@ -2,6 +2,8 @@
 
 순서: **① 헬퍼 PC → ② 개발자 PC(C++) → ③ 플러그인(셰이더) → ④ 분산되지 않은 작업 확인**
 
+①과 ②는 Qt 설정 창(`Tools\DistriBuild\setup_gui.py`, README의 "GUI로 설정하기")에서도 할 수 있습니다.
+
 ---
 
 ## ① 헬퍼 PC

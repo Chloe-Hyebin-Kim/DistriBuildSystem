@@ -26,6 +26,28 @@ Incredibuild처럼 LAN의 여러 PC에 빌드 작업을 나눠 실행합니다. 
 - **로컬 폴백**: 원격 작업이 실패하거나 받을 에이전트가 없으면 로컬에서 다시 실행합니다. 코드 오류는 로컬 컴파일러가 다시 보고하므로 빌드 결과는 로컬 빌드와 같습니다.
 - **소스 동기화가 필요 없음**: C++는 전처리된 텍스트와 PCH만 보냅니다. 에이전트 PC에는 같은 버전의 컴파일러만 있으면 됩니다. 셰이더는 5.8에서는 작업 파일에 소스가 들어 있고, 4.26에서는 셰이더 폴더를 번들로 올려 에이전트가 해시별로 캐시합니다.
 
+## GUI로 설정하기 (Qt)
+
+`Tools\DistriBuild\setup_gui.py`는 아래 1, 2장의 설정을 창에서 합니다. 같은 `agent.json`과 `client.json`을 편집하므로 명령줄 도구와 함께 쓸 수 있습니다.
+
+```bash
+pip install PySide6-Essentials
+```
+```bash
+python Tools\DistriBuild\setup_gui.py
+```
+
+Python이 없는 PC에서 쓰려면 `pip install pyinstaller`까지 한 뒤 `build_setup_gui.bat`으로 `dist\DistriBuildSetup.exe`를 만듭니다.
+
+| 탭 | 할 수 있는 일 |
+|---|---|
+| 헬퍼 PC | 에이전트 설정과 시작/중지, 방화벽 규칙(UAC), 제공 중인 컴파일러와 엔진 확인 |
+| 개발자 PC | xgConsole 빌드, 서비스 설치/제거(UAC), `--doctor`, 헬퍼 PC 검색과 컴파일러 일치 확인, 빌드 옵션, 헬퍼용 패키지 만들기 |
+
+**헬퍼 PC용 패키지**는 개발자 PC의 MSVC 복사본과 실행 파일을 한 폴더에 모읍니다. 그 폴더의 내용을 헬퍼 PC의 `C:\DistriBuild`에 복사하고 `DistriBuildSetup.exe`를 실행하면 컴파일러가 자동으로 등록됩니다.
+
+창에서 시작한 에이전트는 창을 닫으면 함께 중지됩니다.
+
 ## 1. 에이전트 설치 (헬퍼 PC마다)
 
 Python 3.9 이상이 필요합니다. Python이 없는 PC에는 `build_xgconsole.bat`으로 만든 `dist\DistriBuildAgent.exe`를 복사하면 됩니다.
@@ -88,6 +110,7 @@ python agent.py --config agent.json
 |---|---|---|
 | `check_plugin_headers.py` | 엔진 소스 헤더로 플러그인 컴파일 (UHT 없이 수 초) | 압축 푼 `Engine/Source` |
 | `e2e_windows.py` | 실제 cl/link/cl-filter로 두 UBT 형식의 전체 경로, 오류 처리, 4.26 셰이더 경로 재작성 | MSVC |
+| `check_setup_gui.py` | Qt 설정 창을 임시 홈 폴더와 별도 포트에서 실제 에이전트로 구동 | PySide6, MSVC |
 | `real_engine_check.py` | 실제 UBT 작업 파일 빌드, UBT의 up-to-date 판정, 실제 에디터 쿠킹의 셰이더 작업 | 설치된 엔진 |
 | `Tools\BuildPlugin.bat` | RunUAT로 플러그인 패키징 | 설치된 엔진 |
 
