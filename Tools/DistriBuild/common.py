@@ -404,5 +404,9 @@ def msvc_include_prefix(compiler):
 
 
 def log(msg):
-    sys.stdout.write(msg + "\n")
+    try:
+        sys.stdout.write(msg + "\n")
+    except UnicodeEncodeError:  # compiler output can hold characters the console's code page lacks
+        encoding = sys.stdout.encoding or "ascii"
+        sys.stdout.write((msg + "\n").encode(encoding, "replace").decode(encoding))
     sys.stdout.flush()

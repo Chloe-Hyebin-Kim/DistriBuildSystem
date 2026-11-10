@@ -371,6 +371,13 @@ def test_failure(ue5, cl, link, cl_filter, env, agent_port, tmp):
     R.check(code != 0, "build fails with a nonzero exit code")
     R.check("broken.cpp" in text and "undeclared_symbol_xyz" in text, "the real error reaches UBT, naming the source file", text)
     R.check("C2065" in text, "the compiler's error code is in the output", text)
+    # The first build ran broken.cpp locally while the PCH uploaded. Now the agent has it, so it fails there.
+    project.pch_exists = True
+    project.task_file(xml)
+    run_xgconsole(xml, {"agents": ["127.0.0.1:%d" % agent_port], "max_local": 2, "local_first": False}, env, os.path.join(root, "report2"))
+    with open(os.path.join(tmp, "agent.log"), errors="replace") as f:
+        agent_log = f.read()
+    R.check("undeclared_symbol_xyz" in agent_log, "the agent window shows why a remote compile failed", agent_log[-2000:])
     linked = [r for r in rows if r["task"] == "module.exe"]
     R.check(linked and linked[0]["ran_on"] == "not run", "link is skipped after a failed compile", json.dumps(linked))
     R.check(not os.path.isfile(project.exe), "no executable is produced")

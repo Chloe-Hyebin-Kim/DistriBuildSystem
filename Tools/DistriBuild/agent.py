@@ -44,6 +44,8 @@ from common import (DEFAULT_PORT, DISCOVERY_PORT, DISCOVERY_PROBE, IS_WINDOWS, S
 BIN_PLATFORM = {"Windows": "Win64", "Linux": "Linux", "Darwin": "Mac"}.get(platform.system(), "Win64")
 SCW_NAME = "ShaderCompileWorker.exe" if IS_WINDOWS else "ShaderCompileWorker"
 KEEP_SOURCE_BUNDLES = 6
+COMPILER_ERROR = re.compile(r"\berror\b\s*(?:[A-Za-z]+\d+\s*)?:")
+MAX_LOGGED_ERRORS = 5
 # Helper PCs are often someone's workstation; builds must not make them unresponsive.
 JOB_CREATION_FLAGS = subprocess.BELOW_NORMAL_PRIORITY_CLASS if IS_WINDOWS else 0
 
@@ -368,6 +370,13 @@ class Agent:
             shutil.rmtree(work, ignore_errors=True)
 
 
+def failure_summary(output):
+    """The lines of a failed compile worth showing in the agent window."""
+    lines = [l.strip() for l in output.splitlines() if l.strip()]
+    errors = [l for l in lines if COMPILER_ERROR.search(l)]
+    return [l[:300] for l in (errors[:MAX_LOGGED_ERRORS] or lines[-MAX_LOGGED_ERRORS:])]
+
+
 class Handler(socketserver.BaseRequestHandler):
     def handle(self):
         agent = self.server.agent
@@ -422,6 +431,9 @@ class Handler(socketserver.BaseRequestHandler):
                     run_hdr.get("caption", ""), resp.get("exit_code"), resp.get("elapsed", 0)))
                 if not resp.get("ok"):
                     log("    rejected: %s" % resp.get("reason"))
+                elif resp.get("exit_code") != 0:
+                    for line in failure_summary(resp.get("stdout", "")):
+                        log("    " + line)
             finally:
                 if upload_key:
                     agent.end_upload(upload_key)
