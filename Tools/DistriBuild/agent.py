@@ -39,7 +39,7 @@ import time
 
 from common import (DEFAULT_PORT, DISCOVERY_PORT, DISCOVERY_PROBE, IS_WINDOWS, SAFE_BLOB_NAME, SAFE_BUNDLE_HASH,
                     compiler_family, compiler_id, decode_output, log, recv_file_stream, recv_frame,
-                    remap_shader_source_dirs, send_frame, split_cmdline)
+                    remap_shader_source_dirs, send_frame, set_log_file, split_cmdline)
 
 BIN_PLATFORM = {"Windows": "Win64", "Linux": "Linux", "Darwin": "Mac"}.get(platform.system(), "Win64")
 SCW_NAME = "ShaderCompileWorker.exe" if IS_WINDOWS else "ShaderCompileWorker"
@@ -444,8 +444,14 @@ class Handler(socketserver.BaseRequestHandler):
 
 class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # On Windows SO_REUSEADDR lets a second agent share the port silently; take it exclusively instead.
+    allow_reuse_address = not IS_WINDOWS
     request_queue_size = 256
+
+    def server_bind(self):
+        if IS_WINDOWS:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def discovery_loop(agent):
@@ -475,7 +481,10 @@ def main():
     ap.add_argument("--compiler", action="append", default=[], help="compiler executable (repeatable)")
     ap.add_argument("--no-auto-detect", action="store_true")
     ap.add_argument("--print-detected", action="store_true")
+    ap.add_argument("--log", help="also append the log to this file (for an agent started without a console)")
     args = ap.parse_args()
+    if args.log:
+        set_log_file(args.log)
 
     cfg = {}
     if args.config:
@@ -504,7 +513,11 @@ def main():
         return
 
     threading.Thread(target=discovery_loop, args=(agent,), daemon=True).start()
-    server = Server(("", agent.port), Handler)
+    try:
+        server = Server(("", agent.port), Handler)
+    except OSError as e:
+        log("ERROR: cannot listen on port %d (%s). Is another agent already running?" % (agent.port, e))
+        sys.exit(2)
     server.agent = agent
     try:
         server.serve_forever()

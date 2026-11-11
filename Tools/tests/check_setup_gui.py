@@ -9,8 +9,12 @@ Nothing here needs administrator rights: the UAC path is exercised with an unele
 """
 
 import argparse
+import base64
+import glob
+import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -207,6 +211,53 @@ def main():
     helper.stop_agent()
     check(pump(lambda: not gui.port_in_use(PORT), 20), "the agent stops")
     check(not helper.is_running() and helper.start_button.isEnabled(), "the window notices")
+
+    print("Start with Windows (the UAC step is recorded, not run; check_autostart.py runs a real task):")
+    pump(lambda: settled(helper.rescan_button))
+    check(helper.autostart is None and "꺼짐" in helper.autostart_status.text() and not helper.autostart_off_button.isEnabled(),
+          "it shows as off")
+    recorded = []
+    real_run_elevated, real_query = gui.run_elevated, gui.autostart_query
+
+    def fake_run_elevated(command, hwnd=0, verb="runas"):
+        xml_file = re.search(r'/XML "([^"]+)"', command)
+        if xml_file:
+            with open(xml_file.group(1), encoding="utf-16") as f:
+                recorded.append((command, f.read()))
+        else:
+            recorded.append((command, ""))
+        return 0, ""
+
+    gui.run_elevated = fake_run_elevated
+    try:
+        helper.enable_autostart()
+        check(pump(lambda: bool(recorded) and settled(helper.autostart_on_button), 30), "turning it on asks for UAC once")
+        command, xml = recorded[0] if recorded else ("", "")
+        expected = gui.autostart_command(helper.config_path)
+        check('schtasks /Create /TN "%s"' % gui.AUTOSTART_TASK in command and command.rstrip().endswith('/Run /TN "%s"' % gui.AUTOSTART_TASK),
+              "it registers the task and starts it")
+        check("<BootTrigger>" in xml and html.escape(expected[0], quote=False) in xml and "--log" in xml,
+              "the task runs this agent as SYSTEM at startup")
+        check(not glob.glob(os.path.join(tempfile.gettempdir(), "distribuild_task_*.xml")), "the task file is removed afterwards")
+        gui.autostart_query = lambda: {"command": expected[0], "arguments": subprocess.list2cmdline(expected[1:]),
+                                       "log": expected[-1]}
+        helper.scan()
+        check(pump(lambda: helper.autostart is not None and settled(helper.rescan_button)), "a registered task is noticed")
+        check("켜짐" in helper.autostart_status.text() and helper.autostart_on_button.text().startswith("설정 적용해 다시 시작")
+              and helper.autostart_off_button.isEnabled(), "it shows as on, with restart and off buttons")
+        gui.autostart_query = lambda: {"command": r"D:\old\DistriBuildAgent.exe", "arguments": "--config x", "log": r"D:\old\a.log"}
+        helper.scan()
+        pump(lambda: helper.autostart["command"].startswith("D:") and settled(helper.rescan_button))
+        check(helper.autostart_on_button.text().startswith("이 위치로 다시 등록"), "a task left by a moved package is pointed out")
+        recorded.clear()
+        helper.disable_autostart()
+        check(pump(lambda: bool(recorded) and settled(helper.autostart_off_button), 30), "turning it off asks for UAC once")
+        command = recorded[0][0] if recorded else ""
+        script = base64.b64decode(command.split("-EncodedCommand ")[-1].split()[0]).decode("utf-16-le") if recorded else ""
+        check('schtasks /Delete /TN "%s"' % gui.AUTOSTART_TASK in command and r"D:\old\a.log" in script
+              and expected[-1] in script, "it deletes the task and ends both the old and the current agent")
+    finally:
+        gui.run_elevated, gui.autostart_query = real_run_elevated, real_query
     window.close()
 
 

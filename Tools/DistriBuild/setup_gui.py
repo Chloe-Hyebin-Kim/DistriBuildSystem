@@ -10,6 +10,7 @@ It edits the same files the command line tools read (agent.json, ~/.distribuild/
 runs the existing install_client.bat, so everything stays usable without the GUI.
 """
 
+import base64
 import ctypes
 import glob
 import html
@@ -35,7 +36,7 @@ if IS_WINDOWS:
     subprocess.Popen = _NoWindowPopen
 
 try:
-    from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, Qt, Signal, Slot
+    from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, Qt, QTimer, Signal, Slot
     from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QDoubleSpinBox,
                                    QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -57,6 +58,7 @@ SERVICE = "Incredibuild Agent"
 SHIM = "DistriBuildXgeShim"
 FIREWALL_TCP = "DistriBuild Agent TCP"
 FIREWALL_UDP = "DistriBuild Agent UDP"
+AUTOSTART_TASK = "DistriBuild Agent"
 PACKAGE_EXES = ("DistriBuildSetup.exe", "DistriBuildAgent.exe")
 # A cross compiler also needs the host toolset's DLLs, so only x64-hosted x64 copies work on their own.
 PACKAGEABLE = re.compile(r"^msvc-.*-x64$")
@@ -207,6 +209,112 @@ def firewall_is_open(tcp_port, udp_port):
     return True
 
 
+# --------------------------------------------------------------------------- start with Windows
+
+def autostart_log_path(config_path):
+    return os.path.join(os.path.dirname(os.path.abspath(config_path)), "agent-autostart.log")
+
+
+def autostart_command(config_path):
+    """The agent command the startup task runs. Its --log path also identifies its processes."""
+    command = agent_command(config_path)
+    return command and command + ["--log", autostart_log_path(config_path)]
+
+
+def autostart_task_xml(command, working_dir):
+    """A Task Scheduler task that runs command as SYSTEM when the PC starts, before anyone signs in.
+
+    The logon trigger only matters if the boot start was missed (a fast-startup boot can skip it);
+    IgnoreNew keeps a second copy from starting. Below-normal priority keeps the helper usable.
+    """
+    from xml.sax.saxutils import escape
+    return """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>DistriBuild helper agent. Created by DistriBuildSetup.</Description>
+    <SecurityDescriptor>D:AI(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;AU)</SecurityDescriptor>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger><Enabled>true</Enabled></BootTrigger>
+    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>%s</Command>
+      <Arguments>%s</Arguments>
+      <WorkingDirectory>%s</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+""" % (escape(command[0]), escape(subprocess.list2cmdline(command[1:])), escape(working_dir))
+
+
+def autostart_query():
+    """The registered startup task as {"command", "arguments", "log"}, or None if there is none."""
+    if not IS_WINDOWS:
+        return None
+    result = subprocess.run(["schtasks", "/Query", "/TN", AUTOSTART_TASK, "/XML"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        return None
+    import xml.etree.ElementTree as ET
+    text = decode_output(result.stdout)
+    try:
+        root = ET.fromstring(re.sub(r"^\s*<\?xml[^>]*\?>", "", text))
+    except ET.ParseError:
+        return {"command": "", "arguments": "", "log": None}
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    command = root.findtext("t:Actions/t:Exec/t:Command", "", ns)
+    arguments = root.findtext("t:Actions/t:Exec/t:Arguments", "", ns)
+    found = re.search(r'--log\s+(?:"([^"]+)"|(\S+))', arguments)
+    return {"command": command, "arguments": arguments, "log": found and (found.group(1) or found.group(2))}
+
+
+def autostart_matches(task, command):
+    return bool(task) and (task["command"], task["arguments"]) == (command[0], subprocess.list2cmdline(command[1:]))
+
+
+def stop_processes_command(markers):
+    """A cmd step that ends every process whose command line holds one of markers, with its children.
+
+    Ending the task alone would leave the agent's compiles, and the real process of a one-file exe, running.
+    """
+    quoted = ", ".join("'%s'" % m.replace("'", "''") for m in markers)
+    script = ("$m = @(%s); Get-CimInstance Win32_Process | Where-Object { $c = $_.CommandLine; "
+              "$c -and ($m | Where-Object { $c.Contains($_) }) } | ForEach-Object { "
+              "taskkill /PID $_.ProcessId /T /F 2>$null | Out-Null }; exit 0" % quoted)
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded
+
+
+def autostart_enable_command(xml_path, markers):
+    return ('(%s & schtasks /Create /TN "%s" /XML "%s" /F) && schtasks /Run /TN "%s"'
+            % (stop_processes_command(markers), AUTOSTART_TASK, xml_path, AUTOSTART_TASK))
+
+
+def autostart_disable_command(markers):
+    return '%s & schtasks /Delete /TN "%s" /F' % (stop_processes_command(markers), AUTOSTART_TASK)
+
+
 # --------------------------------------------------------------------------- helper PC work
 
 def agent_command(config_path):
@@ -247,7 +355,8 @@ def scan_helper(compilers, engines, auto, port, discovery_port, token):
                      for key, path in sorted(found.items()) if key not in seen]
     info, _ = probe_agent("127.0.0.1", port, token, timeout=0.5)
     listening = info is not None or port_in_use(port)
-    return {"rows": rows, "listening": listening, "firewall": firewall_is_open(port, discovery_port)}
+    return {"rows": rows, "listening": listening, "firewall": firewall_is_open(port, discovery_port),
+            "autostart": autostart_query()}
 
 
 def port_in_use(port):
@@ -523,6 +632,7 @@ class HelperPage(Page):
         self.engines = list(self.loaded.get("engines", []))
         self.process = None
         self.listening = False
+        self.autostart = None
         self.pick_up_packaged_compilers()
         self.build_ui()
         self.scan()
@@ -572,12 +682,30 @@ class HelperPage(Page):
         self.stop_button.clicked.connect(self.stop_agent)
         run_layout = QVBoxLayout()
         run_layout.addWidget(self.agent_status)
-        note = QLabel("이 창을 닫으면 여기서 시작한 에이전트도 중지됩니다.")
+        note = QLabel("이 창을 닫으면 여기서 시작한 에이전트도 중지됩니다. 자동 시작된 에이전트는 계속 실행됩니다.")
+        note.setWordWrap(True)
         note.setStyleSheet("color: %s" % NEUTRAL)
         run_layout.addWidget(note)
         run_layout.addLayout(button_row(self.start_button, self.stop_button))
         run_group = QGroupBox("실행")
         run_group.setLayout(run_layout)
+
+        self.autostart_status = QLabel()
+        self.autostart_status.setWordWrap(True)
+        self.autostart_on_button = QPushButton("자동 시작 켜기 (관리자)")
+        self.autostart_off_button = QPushButton("자동 시작 끄기 (관리자)")
+        self.autostart_on_button.clicked.connect(self.enable_autostart)
+        self.autostart_off_button.clicked.connect(self.disable_autostart)
+        autostart_layout = QVBoxLayout()
+        autostart_layout.addWidget(self.autostart_status)
+        note = QLabel("PC가 켜지면 로그인하지 않아도 SYSTEM 계정으로 에이전트가 시작됩니다. "
+                      "사용자 환경 변수(UE_ROOT, 사용자 PATH)로만 찾은 엔진이나 컴파일러는 직접 추가해 두세요.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: %s" % NEUTRAL)
+        autostart_layout.addWidget(note)
+        autostart_layout.addLayout(button_row(self.autostart_on_button, self.autostart_off_button))
+        autostart_group = QGroupBox("PC를 켜면 자동 시작")
+        autostart_group.setLayout(autostart_layout)
 
         self.firewall_status = QLabel()
         self.firewall_open_button = QPushButton("방화벽 열기 (관리자)")
@@ -622,6 +750,7 @@ class HelperPage(Page):
 
         left = QVBoxLayout()
         left.addWidget(run_group)
+        left.addWidget(autostart_group)
         left.addWidget(settings)
         left.addWidget(firewall_group)
         left.addStretch(1)
@@ -664,6 +793,8 @@ class HelperPage(Page):
         self.log("[ok] 저장했습니다: %s" % self.config_path)
         if self.is_running():
             self.log("실행 중인 에이전트에는 다시 시작해야 적용됩니다.")
+        if self.autostart:
+            self.log("자동 시작 에이전트에 적용하려면 '설정 적용해 다시 시작'을 누르세요.")
 
     def scan(self):
         compilers, engines, auto = list(self.compilers), list(self.engines), self.auto_detect.isChecked()
@@ -680,6 +811,7 @@ class HelperPage(Page):
             add_table_row(table, [labels[row["kind"]], identifier, row["path"], "직접 추가" if row["manual"] else "자동"],
                           row, color=None if row["id"] else (1, BAD), tooltip=row["path"])
         self.listening = result["listening"]
+        self.autostart = result["autostart"]
         self.update_run_state()
         state = result["firewall"]
         text = {True: "TCP %d, UDP %d 허용됨", False: "TCP %d, UDP %d 규칙 없음 (다른 PC에서 접속하려면 필요)",
@@ -693,12 +825,70 @@ class HelperPage(Page):
         running = self.is_running()
         if running:
             self.agent_status.setText(status_html(True, "실행 중"))
+        elif self.listening and self.autostart:
+            self.agent_status.setText(status_html(True, "자동 시작으로 실행 중"))
         elif self.listening:
             self.agent_status.setText(status_html(True, "이 PC에서 이미 실행 중 (다른 프로그램에서 시작함)"))
         else:
             self.agent_status.setText(status_html(False, "중지됨"))
         self.start_button.setEnabled(not running and not self.listening)
         self.stop_button.setEnabled(running)
+        self.update_autostart_state()
+
+    def update_autostart_state(self):
+        task, command = self.autostart, autostart_command(self.config_path)
+        if task is None:
+            self.autostart_status.setText(status_html(False, "꺼짐"))
+            self.autostart_on_button.setText("자동 시작 켜기 (관리자)")
+        elif command and autostart_matches(task, command):
+            self.autostart_status.setText(status_html(True, "켜짐 (로그: %s)" % task["log"]))
+            self.autostart_on_button.setText("설정 적용해 다시 시작 (관리자)")
+        else:
+            self.autostart_status.setText(status_html(
+                False, "켜져 있지만 다른 위치의 에이전트를 실행합니다: %s %s" % (task["command"], task["arguments"])))
+            self.autostart_on_button.setText("이 위치로 다시 등록 (관리자)")
+        if command is None:
+            self.autostart_on_button.setEnabled(False)
+            self.autostart_on_button.setToolTip("DistriBuildAgent.exe를 이 프로그램과 같은 폴더에 두어야 합니다.")
+        self.autostart_off_button.setEnabled(task is not None)
+
+    def autostart_markers(self):
+        markers = {autostart_log_path(self.config_path)}
+        if self.autostart and self.autostart["log"]:
+            markers.add(self.autostart["log"])
+        return sorted(markers)
+
+    def enable_autostart(self):
+        command = autostart_command(self.config_path)
+        if command is None:
+            self.log("[!!] DistriBuildAgent.exe를 이 프로그램과 같은 폴더에 두어야 합니다.")
+            return
+        if not self.autostart and not self.is_running() and port_in_use(self.port.value()):
+            self.log("[!!] 포트 %d을 다른 프로그램이 쓰고 있습니다. 그 프로그램을 끄거나 포트를 바꾼 뒤 다시 누르세요."
+                     % self.port.value())
+            return
+        self.save()
+        if self.is_running():
+            self.log("이 창에서 시작한 에이전트를 멈추고 자동 시작 에이전트로 바꿉니다.")
+            self.stop_agent()
+        handle, xml_path = tempfile.mkstemp(prefix="distribuild_task_", suffix=".xml")
+        with os.fdopen(handle, "w", encoding="utf-16") as f:
+            f.write(autostart_task_xml(command, APP_DIR))
+
+        def done():
+            try:
+                os.remove(xml_path)
+            except OSError:
+                pass
+            # The agent needs a moment to look for compilers before it listens.
+            QTimer.singleShot(4000, self.scan)
+
+        self.elevate(autostart_enable_command(xml_path, self.autostart_markers()),
+                     self.autostart_on_button, "자동 시작 켜기", done)
+
+    def disable_autostart(self):
+        self.elevate(autostart_disable_command(self.autostart_markers()),
+                     self.autostart_off_button, "자동 시작 끄기", self.scan)
 
     def start_agent(self):
         if self.is_running():

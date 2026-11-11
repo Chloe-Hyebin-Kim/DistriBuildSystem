@@ -41,12 +41,18 @@ Python이 없는 PC에서 쓰려면 `pip install pyinstaller`까지 한 뒤 `bui
 
 | 탭 | 할 수 있는 일 |
 |---|---|
-| 헬퍼 PC | 에이전트 설정과 시작/중지, 방화벽 규칙(UAC), 제공 중인 컴파일러와 엔진 확인 |
+| 헬퍼 PC | 에이전트 설정과 시작/중지, PC를 켜면 자동 시작(UAC), 방화벽 규칙(UAC), 제공 중인 컴파일러와 엔진 확인 |
 | 개발자 PC | xgConsole 빌드, 서비스 설치/제거(UAC), `--doctor`, 헬퍼 PC 검색과 컴파일러 일치 확인, 빌드 옵션, 헬퍼용 패키지 만들기 |
 
 **헬퍼 PC용 패키지**는 개발자 PC의 MSVC 복사본과 실행 파일을 한 폴더에 모읍니다. 그 폴더의 내용을 헬퍼 PC의 `C:\DistriBuild`에 복사하고 `DistriBuildSetup.exe`를 실행하면 컴파일러가 자동으로 등록됩니다.
 
-창에서 시작한 에이전트는 창을 닫으면 함께 중지됩니다.
+창에서 시작한 에이전트는 창을 닫으면 함께 중지됩니다. 헬퍼 PC를 계속 헬퍼로 쓰려면 **자동 시작 켜기**를 누르세요.
+
+- 작업 스케줄러에 `DistriBuild Agent` 작업을 등록합니다. PC가 켜지면 로그인하지 않아도 SYSTEM 계정으로 에이전트가 시작되고, 창을 닫아도 계속 실행됩니다.
+- 로그는 설정 파일 옆의 `agent-autostart.log`에 남습니다(5MB가 넘으면 `.old`로 바꿉니다).
+- 설정을 바꾸면 **설정 적용해 다시 시작**을 누릅니다. 패키지 폴더를 옮기면 **이 위치로 다시 등록**이 나타납니다.
+- SYSTEM 계정은 사용자 환경 변수(`UE_ROOT`, 사용자 PATH)를 보지 못하므로 그렇게만 찾은 엔진과 컴파일러는 직접 추가해 두세요.
+- 작업은 보통보다 낮은 우선순위로 실행되어 헬퍼 PC를 쓰는 사람에게 방해가 덜 됩니다.
 
 ## 1. 에이전트 설치 (헬퍼 PC마다)
 
@@ -60,7 +66,7 @@ python agent.py --print-detected
 ```bash
 python agent.py --config agent.json
 ```
-설정 형식은 `agent.example.json`을 참고하세요. 방화벽에서 **TCP 31890**과 **UDP 31891**을 열어야 합니다.
+설정 형식은 `agent.example.json`을 참고하세요. 방화벽에서 **TCP 31890**과 **UDP 31891**을 열어야 합니다. `--log <파일>`을 주면 출력을 파일에도 남깁니다. 같은 포트에 에이전트가 이미 있으면 두 번째 에이전트는 시작하지 않고 종료 코드 2로 끝납니다.
 
 **에이전트에는 개발자 PC의 UBT가 고른 것과 같은 MSVC가 있어야 합니다.** 빌드 번호까지 같아야 하므로 팀 전체가 같은 버전을 쓰세요. UBT는 설치된 것 중 가장 새 버전을 고를 수 있습니다(`xgConsole --doctor`로 확인).
 
@@ -111,6 +117,7 @@ python agent.py --config agent.json
 | `check_plugin_headers.py` | 엔진 소스 헤더로 플러그인 컴파일 (UHT 없이 수 초) | 압축 푼 `Engine/Source` |
 | `e2e_windows.py` | 실제 cl/link/cl-filter로 두 UBT 형식의 전체 경로, 오류 처리, 4.26 셰이더 경로 재작성 | MSVC |
 | `check_setup_gui.py` | Qt 설정 창을 임시 홈 폴더와 별도 포트에서 실제 에이전트로 구동 | PySide6, MSVC |
+| `check_autostart.py` | 자동 시작 작업을 실제 작업 스케줄러에 등록해 실행/중지 (관리자 권한 없이, 현재 사용자로). `--exe`는 빌드한 exe로 | PySide6 |
 | `real_engine_check.py` | 실제 UBT 작업 파일 빌드, UBT의 up-to-date 판정, 실제 에디터 쿠킹의 셰이더 작업 | 설치된 엔진 |
 | `Tools\BuildPlugin.bat` | RunUAT로 플러그인 패키징 | 설치된 엔진 |
 

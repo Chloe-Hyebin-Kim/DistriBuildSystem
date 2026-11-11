@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import zlib
 
 MAGIC = b"DBLD"
@@ -403,10 +404,35 @@ def msvc_include_prefix(compiler):
     return prefix
 
 
+_log_file = None
+_log_lock = threading.Lock()
+LOG_LIMIT = 5 * 1024 * 1024
+
+
+def set_log_file(path):
+    """Also appends every log line to path. A file over LOG_LIMIT is moved to path.old first."""
+    global _log_file
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    try:
+        if os.path.getsize(path) > LOG_LIMIT:
+            os.replace(path, path + ".old")
+    except OSError:
+        pass
+    _log_file = open(path, "a", encoding="utf-8", buffering=1)
+
+
 def log(msg):
+    if _log_file is not None:
+        with _log_lock:
+            _log_file.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    if sys.stdout is None:  # started without a console
+        return
     try:
         sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
     except UnicodeEncodeError:  # compiler output can hold characters the console's code page lacks
         encoding = sys.stdout.encoding or "ascii"
         sys.stdout.write((msg + "\n").encode(encoding, "replace").decode(encoding))
-    sys.stdout.flush()
+        sys.stdout.flush()
+    except OSError:  # the console it was started from is gone; the log file still has the line
+        pass
