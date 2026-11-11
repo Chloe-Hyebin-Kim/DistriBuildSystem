@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,7 @@ sys.path.insert(0, TOOLS)
 
 import setup_gui as gui  # noqa: E402  (the environment above must be set first)
 import xgconsole  # noqa: E402
-from common import compiler_id  # noqa: E402
+from common import compiler_id, contacts_path  # noqa: E402
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -183,6 +184,51 @@ def main():
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(fixed.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         fixed.wait(10)
     developer.addresses.remove("127.0.0.1:%d" % FIXED_PORT)
+    developer.save()
+
+    print("Pinned helpers that do not answer:")
+    hung = []
+    for _ in range(3):  # accept the connection but never answer: each costs the whole connect_timeout
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(5)
+        hung.append(s)
+    hung_addresses = ["127.0.0.1:%d" % s.getsockname()[1] for s in hung]
+    cfg = xgconsole.load_config()
+    cfg["agents"] = cfg["agents"] + hung_addresses
+    started = time.time()
+    pool = xgconsole.AgentPool(cfg)
+    took = time.time() - started
+    check(pool.capacity() == 3 and took < cfg["connect_timeout"] + 2,
+          "three hung helpers cost one wait, not three (%.1fs, connect_timeout %ss)" % (took, cfg["connect_timeout"]))
+    contacts = gui.load_agent_contacts()
+    check(all("failing_since" in contacts.get(a, {}) for a in hung_addresses) and "last_ok" in contacts.get(cfg["agents"][0], {}),
+          "each build records which pinned addresses answered")
+    for s in hung:
+        s.close()
+
+    gone = socket.socket()
+    gone.bind(("127.0.0.1", 0))
+    gone_address = "127.0.0.1:%d" % gone.getsockname()[1]
+    gone.close()  # nothing listens there any more
+    recent = "127.0.0.1:1"
+    contacts[gone_address] = {"last_ok": time.time() - 20 * 86400, "failing_since": time.time() - 10 * 86400}
+    contacts[recent] = {"last_ok": time.time() - 2 * 86400, "failing_since": time.time() - 3600}
+    with open(contacts_path(), "w", encoding="utf-8") as f:
+        json.dump(contacts, f)
+    developer.addresses += [gone_address, recent]
+    developer.find_agents()
+    pump(lambda: settled(developer.find_button) and any(r["address"] == gone_address for r in developer.agent_rows))
+    rows = {r[0]: r for r in table_rows(developer.agent_table)}
+    check("10일째 연결 안 됨" in rows.get(gone_address, [""] * 4)[3], "an address down for 10 days says so")
+    check("마지막 연결 2일 전" in rows.get(recent, [""] * 4)[3], "a recently lost one shows when it last answered")
+    check(developer.remove_stale_button.isEnabled(), "the clean-up button is offered")
+    developer.remove_stale()
+    pump(lambda: settled(developer.find_button))
+    check(gone_address not in developer.addresses and recent in developer.addresses,
+          "only the long-gone address is removed")
+    check(not developer.remove_stale_button.isEnabled(), "the button goes away with it")
+    developer.addresses.remove(recent)
     developer.save()
 
     print("Pictures:")

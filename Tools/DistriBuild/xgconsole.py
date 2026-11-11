@@ -58,7 +58,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from common import (DISCOVERY_PORT, IS_WINDOWS, base_name, compiler_family, compiler_id, decode_output,
                     discover_agents, expand_response_files, msvc_include_prefix, parse_agent_address, recv_frame,
-                    send_file_stream, send_frame, split_cmdline)
+                    record_agent_contacts, send_file_stream, send_frame, split_cmdline)
 
 CPP_EXT = (".cpp", ".cc", ".cxx", ".c++", ".cp")
 C_EXT = (".c",)
@@ -111,20 +111,38 @@ class AgentPool:
         self.cfg = cfg
         self.lock = threading.Lock()
         self.agents = {}
-        addrs = [parse_agent_address(a) for a in cfg["agents"]]
-        for addr in filter(None, addrs):
-            self._query(*addr)
+        # Pinned agents are asked all at once, while discovery listens, so a dead address costs
+        # one connect_timeout per build instead of one each.
+        self.answered = {}
+        threads = []
+        for text in cfg["agents"]:
+            addr = parse_agent_address(text)
+            if addr:
+                self.answered[text] = False
+                threads.append(threading.Thread(target=self._query, args=addr + (text,), daemon=True))
+        for t in threads:
+            t.start()
         if cfg["discovery"]:
             for host, info in discover_agents(int(cfg["discovery_port"])):
                 self._update(host, int(info.get("port")), info)
+        deadline = time.time() + float(cfg["connect_timeout"]) + 1
+        for t in threads:
+            t.join(max(0.0, deadline - time.time()))
+        with self.lock:
+            answered = dict(self.answered)
+        record_agent_contacts(answered)
 
-    def _query(self, host, port):
+    def _query(self, host, port, text=None):
         try:
             with socket.create_connection((host, port), timeout=self.cfg["connect_timeout"]) as s:
                 send_frame(s, {"type": "info", "token": self.cfg["token"]})
                 info, _ = recv_frame(s)
+            with self.lock:
+                self.answered[text] = True
             if info.get("type") == "info":
                 self._update(host, port, info)
+            else:
+                print("DistriBuild: agent %s:%d refused (%s)" % (host, port, info.get("reason")))
         except (OSError, ValueError) as e:
             print("DistriBuild: agent %s:%d unreachable (%s)" % (host, port, e))
 

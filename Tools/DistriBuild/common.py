@@ -140,6 +140,63 @@ def parse_agent_address(text):
     return host, int(port)
 
 
+STALE_AFTER_DAYS = 7
+
+
+def contacts_path():
+    """When each pinned helper address last answered, kept by xgConsole and the setup window."""
+    return os.path.join(os.path.expanduser("~"), ".distribuild", "agent_contacts.json")
+
+
+def load_agent_contacts():
+    """{address: {"last_ok": epoch, "failing_since": epoch}}; either key may be missing."""
+    try:
+        with open(contacts_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_agent_contacts(results):
+    """results: {address: answered}. Never fails a build: an unwritable file is simply skipped."""
+    if not results:
+        return
+    data = load_agent_contacts()
+    now = int(time.time())
+    for address, answered in results.items():
+        entry = data.get(address) if isinstance(data.get(address), dict) else {}
+        if answered:
+            entry["last_ok"] = now
+            entry.pop("failing_since", None)
+        else:
+            entry.setdefault("failing_since", now)
+        data[address] = entry
+    path = contacts_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temp = "%s.%d.tmp" % (path, os.getpid())
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp, path)
+    except OSError:
+        pass
+
+
+def contact_note(entry, now=None):
+    """(Korean note, stale) for a pinned address that did not answer this time."""
+    now = now or time.time()
+    since = (entry or {}).get("failing_since")
+    days = int((now - since) // 86400) if since else 0
+    if since and days >= STALE_AFTER_DAYS:
+        return "%d일째 연결 안 됨" % days, True
+    last = (entry or {}).get("last_ok")
+    if last:
+        ago = int((now - last) // 86400)
+        return "마지막 연결 %s" % ("오늘" if ago == 0 else "%d일 전" % ago), False
+    return "", False
+
+
 def discover_agents(port=DISCOVERY_PORT, wait=0.7):
     """UDP broadcast probe. Returns list of (host, info dict)."""
     found = {}

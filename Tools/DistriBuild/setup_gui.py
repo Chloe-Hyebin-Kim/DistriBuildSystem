@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -48,8 +49,9 @@ except ImportError:
     sys.exit("PySide6 is required:  pip install PySide6-Essentials")
 
 from agent import detect_compilers, detect_engines, package_compilers
-from common import (DEFAULT_PORT, DISCOVERY_PORT, compiler_family, compiler_id, decode_output, discover_agents,
-                    parse_agent_address, request)
+from common import (DEFAULT_PORT, DISCOVERY_PORT, STALE_AFTER_DAYS, compiler_family, compiler_id, contact_note,
+                    decode_output, discover_agents, load_agent_contacts, parse_agent_address, record_agent_contacts,
+                    request)
 
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
@@ -410,12 +412,16 @@ def local_compilers():
 
 def query_agents(addresses, discovery_port, token):
     rows, seen = [], set()
-    for text in addresses:
-        host, port = parse_agent_address(text)
-        info, error = probe_agent(host, port, token)
-        rows.append({"address": text, "pinned": True, "info": info, "error": error})
+    # All at once: each dead address would otherwise add its own wait.
+    with ThreadPoolExecutor(max_workers=max(1, min(32, len(addresses)))) as pool:
+        answers = list(pool.map(lambda text: probe_agent(*parse_agent_address(text), token=token), addresses))
+    record_agent_contacts({text: error != "연결 실패" for text, (_, error) in zip(addresses, answers)})
+    contacts = load_agent_contacts()
+    for text, (info, error) in zip(addresses, answers):
+        note, stale = contact_note(contacts.get(text)) if error == "연결 실패" else ("", False)
+        rows.append({"address": text, "pinned": True, "info": info, "error": error, "note": note, "stale": stale})
         if info:
-            seen.add((info.get("name"), port))
+            seen.add((info.get("name"), parse_agent_address(text)[1]))
     # An agent on this PC answers on its LAN address and on loopback; keep the one other PCs could use too.
     found = sorted(discover_agents(discovery_port), key=lambda item: item[0].startswith("127."))
     for host, info in found:
@@ -424,7 +430,8 @@ def query_agents(addresses, discovery_port, token):
             continue
         seen.add((info.get("name"), port))
         checked, error = probe_agent(host, port, token)
-        rows.append({"address": "%s:%d" % (host, port), "pinned": False, "info": checked or info, "error": error})
+        rows.append({"address": "%s:%d" % (host, port), "pinned": False, "info": checked or info, "error": error,
+                     "note": "", "stale": False})
     return rows
 
 
@@ -1139,13 +1146,18 @@ class DeveloperPage(Page):
         self.find_button = QPushButton("헬퍼 PC 찾기")
         pin = QPushButton("선택 고정")
         remove = QPushButton("선택 제거")
+        self.remove_stale_button = QPushButton("오래 연결 안 된 주소 제거")
+        self.remove_stale_button.setToolTip("고정한 주소 중 %d일 넘게 응답이 없는 것을 뺍니다. 빌드마다 연결을 기다리지 않게 됩니다."
+                                            % STALE_AFTER_DAYS)
+        self.remove_stale_button.setEnabled(False)
         self.find_button.clicked.connect(self.find_agents)
         pin.clicked.connect(self.pin_selected)
         remove.clicked.connect(self.remove_selected)
+        self.remove_stale_button.clicked.connect(self.remove_stale)
         agents_layout = QVBoxLayout()
         agents_layout.addWidget(self.agent_table, 1)
         agents_layout.addLayout(browse_row(self.address, add))
-        agents_layout.addLayout(button_row(self.find_button, pin, remove))
+        agents_layout.addLayout(button_row(self.find_button, pin, remove, self.remove_stale_button))
         agents_group = QGroupBox("헬퍼 PC")
         agents_group.setLayout(agents_layout)
 
@@ -1349,9 +1361,26 @@ class DeveloperPage(Page):
                 missing = "이 PC에 있지만 헬퍼에 없는 컴파일러: " + (", ".join(sorted(local_ids - offered)) or "없음")
             kind = "고정" if row["pinned"] else "자동 검색" if self.discovery.isChecked() else "자동 검색 꺼짐 (고정 필요)"
             color = (3, BAD) if not usable else (4, BAD) if not common_ids and local_ids else None
+            state = row["error"] or "연결됨"
+            if row.get("note"):
+                state += " (%s)" % row["note"]
+            if row.get("stale"):
+                missing = "빌드할 때마다 이 주소에 연결을 시도하느라 기다립니다. 더 쓰지 않는 헬퍼면 제거하세요."
             add_table_row(table, [row["address"], info.get("name", "-"), info.get("slots", "-"),
-                                  row["error"] or "연결됨", match, kind], row, color=color, tooltip=missing)
+                                  state, match, kind], row, color=color, tooltip=missing)
+        stale = [r["address"] for r in rows if r.get("stale")]
+        self.remove_stale_button.setEnabled(bool(stale))
         self.log("헬퍼 PC %d대를 확인했습니다." % len(rows))
+        if stale:
+            self.log("[!!] %d일 넘게 연결되지 않은 고정 주소: %s" % (STALE_AFTER_DAYS, ", ".join(stale)))
+
+    def remove_stale(self):
+        stale = [r["address"] for r in self.agent_rows if r.get("stale") and r["address"] in self.addresses]
+        for address in stale:
+            self.addresses.remove(address)
+        if stale:
+            self.log("고정 주소에서 뺐습니다: %s (저장해야 빌드에 적용됩니다)" % ", ".join(stale))
+        self.find_agents()
 
     def pin_selected(self):
         for row in selected_data(self.agent_table):
