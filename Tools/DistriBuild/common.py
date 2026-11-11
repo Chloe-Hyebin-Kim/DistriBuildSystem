@@ -282,12 +282,13 @@ _id_cache = {}
 _id_lock = threading.Lock()
 
 
-def compiler_id(path):
+def compiler_id(path, refresh=False):
     """Stable identifier for a compiler build, computed the same way on client and agent so
-    a job only goes to an agent with the exact same compiler."""
+    a job only goes to an agent with the exact same compiler. refresh asks again instead of
+    trusting an earlier answer, for a compiler whose files may have been replaced."""
     resolved = shutil.which(path) or path
     with _id_lock:
-        if resolved in _id_cache:
+        if resolved in _id_cache and not refresh:
             return _id_cache[resolved]
     cid = None
     family = compiler_family(resolved)

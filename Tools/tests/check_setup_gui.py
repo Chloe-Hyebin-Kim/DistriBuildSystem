@@ -24,6 +24,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.normpath(os.path.join(HERE, "..", "DistriBuild"))
 PORT, DISCOVERY = 31990, 31991
+PACKAGE_PORT = 31996
 TOKEN = "gui-test-token"
 
 parser = argparse.ArgumentParser()
@@ -178,10 +179,93 @@ def main():
     check(os.path.isfile(os.path.join(package, "DistriBuildAgent.exe")), "the agent program is included")
     original_app_dir = gui.APP_DIR
     gui.APP_DIR = package
-    helper.compilers = []
+    helper.compilers = [copied]
     helper.pick_up_packaged_compilers()
+    check(helper.compilers == [], "a package compiler an older version saved is dropped from the settings")
+    # This PC has the same compiler installed; like the agent, the window would prefer that copy.
+    pump(lambda: settled(helper.rescan_button))
+    helper.auto_detect.setChecked(False)
+    pump(lambda: settled(helper.rescan_button) and any(r[3] == "패키지" for r in table_rows(helper.offer_table)))
+    check(any(r[1] == cid and r[3] == "패키지" for r in table_rows(helper.offer_table)), "the window lists it as coming from the package")
     gui.APP_DIR = original_app_dir
-    check(helper.compilers == [copied], "a helper picks up the package's compilers on its own")
+    helper.auto_detect.setChecked(True)
+    pump(lambda: settled(helper.rescan_button))
+
+    print("The agent finds package compilers itself:")
+    agent_cfg = os.path.join(work, "package agent.json")
+    with open(agent_cfg, "w", encoding="utf-8") as f:
+        json.dump({"auto_detect": False, "package_dir": package, "work_dir": os.path.join(work, "agent work")}, f)
+    detected = subprocess.run([sys.executable, os.path.join(TOOLS, "agent.py"), "--config", agent_cfg, "--print-detected"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+    check(cid.encode() in detected.stdout, "with nothing in its settings, it offers the package's compiler")
+
+    import agent as agent_module
+    later = os.path.join(work, "later")
+    agent = agent_module.Agent({"auto_detect": False, "package_dir": later, "work_dir": os.path.join(work, "agent work")})
+    previous = {}
+    agent.rescan_package(previous)
+    check(agent.compilers == {}, "an agent with an empty package starts with no compilers")
+    target = os.path.join(later, "msvc", cid)
+    os.makedirs(target)
+    shutil.copy2(cl, target)  # cl.exe alone: the rest of the folder is still "being copied"
+    agent.rescan_package(previous)
+    check(cid not in agent.compilers, "a folder is not used while files are still arriving")
+    shutil.copytree(os.path.dirname(cl), target, dirs_exist_ok=True)
+    agent.rescan_package(previous)
+    check(cid not in agent.compilers, "nor right after the last file")
+    agent.rescan_package(previous)
+    check(agent.compilers.get(cid) == os.path.join(target, "cl.exe") and cid in agent.info()["compilers"],
+          "once the folder stops changing, the running agent offers it")
+    broken = os.path.join(later, "msvc", "broken")
+    os.makedirs(broken)
+    with open(os.path.join(broken, "cl.exe"), "wb") as f:
+        f.write(b"not a program")
+    calls = []
+    real_id = agent_module.compiler_id
+    agent_module.compiler_id = lambda path, refresh=False: calls.append(path) or real_id(path, refresh)
+    try:
+        for _ in range(4):
+            agent.rescan_package(previous)
+    finally:
+        agent_module.compiler_id = real_id
+    check(len(calls) == 1 and len(agent.compilers) == 1, "a broken copy is tried once, not on every scan")
+    subprocess.run(["powershell", "-NoProfile", "-Command",
+                    "Get-Process vctip -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '%s*' } | Stop-Process -Force" % later],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+    shutil.rmtree(target)
+    agent.rescan_package(previous)
+    check(cid not in agent.compilers, "a deleted folder stops being offered")
+
+    print("The packaged agent, and adding to a helper's folder while it runs:")
+    packaged_exe = os.path.join(package, "DistriBuildAgent.exe")
+    exe_cfg = os.path.join(work, "exe agent.json")
+    with open(exe_cfg, "w", encoding="utf-8") as f:
+        json.dump({"auto_detect": False, "port": PACKAGE_PORT, "discovery_port": PACKAGE_PORT + 1,
+                   "work_dir": os.path.join(work, "exe work")}, f)
+    running = subprocess.Popen([packaged_exe, "--config", exe_cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        check(pump(lambda: gui.port_in_use(PACKAGE_PORT), 60), "the packaged agent starts")
+        info, error = gui.probe_agent("127.0.0.1", PACKAGE_PORT, "")
+        check(bool(info) and cid in info["compilers"], "it offers the package's compiler with nothing in its settings (%s)"
+              % (error or "reply received"))
+        lines = []
+        result = gui.build_package(package, {cid: cl}, lines.append)
+        check(result["busy"] == ["DistriBuildAgent.exe"], "the running agent's program is left alone, not an error")
+        check(("이미 있음: %s" % cid) in lines, "a compiler already there is not copied again")
+        check(not [n for n in os.listdir(os.path.join(package, "msvc")) if n.startswith(".")], "no staging folder is left")
+        others = [(other, path) for other, path in developer.compiler_paths.items() if other != cid]
+        if others:
+            other, other_cl = others[0]
+            gui.build_package(package, {other: other_cl}, lambda line: None)
+            seen = pump(lambda: other in (gui.probe_agent("127.0.0.1", PACKAGE_PORT, "")[0] or {}).get("compilers", []),
+                        3 * agent_module.PACKAGE_SCAN_SECONDS)
+            check(seen, "a compiler added to its folder is offered within a minute, without a restart")
+        else:
+            print("  (skipped live pickup: this PC has only one x64 compiler)")
+    finally:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(running.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        running.wait(10)
 
     print("Running with a UAC prompt (unelevated verb):")
     spaced = os.path.join(work, "a b (x86)")

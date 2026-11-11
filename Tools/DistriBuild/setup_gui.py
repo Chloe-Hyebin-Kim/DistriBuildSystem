@@ -12,7 +12,6 @@ runs the existing install_client.bat, so everything stays usable without the GUI
 
 import base64
 import ctypes
-import glob
 import html
 import json
 import os
@@ -23,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -46,7 +46,7 @@ try:
 except ImportError:
     sys.exit("PySide6 is required:  pip install PySide6-Essentials")
 
-from agent import detect_compilers, detect_engines
+from agent import detect_compilers, detect_engines, package_compilers
 from common import (DEFAULT_PORT, DISCOVERY_PORT, compiler_family, compiler_id, decode_output, discover_agents,
                     parse_agent_address, request)
 
@@ -343,16 +343,23 @@ def scan_helper(compilers, engines, auto, port, discovery_port, token):
     for path in compilers:
         cid = compiler_id(path) if os.path.isfile(path) and compiler_family(path) else None
         seen.add(cid)
-        rows.append({"kind": "compiler", "id": cid, "path": path, "manual": True})
+        rows.append({"kind": "compiler", "id": cid, "path": path, "manual": True, "source": "직접 추가"})
     for root in engines:
         found = detect_engines([root], False)
         key = next(iter(found), None)
         seen.add(key)
-        rows.append({"kind": "engine", "id": key, "path": root, "manual": True})
+        rows.append({"kind": "engine", "id": key, "path": root, "manual": True, "source": "직접 추가"})
     if auto:
         for kind, found in (("compiler", detect_compilers([], True)), ("engine", detect_engines([], True))):
-            rows += [{"kind": kind, "id": key, "path": path, "manual": False}
+            rows += [{"kind": kind, "id": key, "path": path, "manual": False, "source": "자동"}
                      for key, path in sorted(found.items()) if key not in seen]
+            seen.update(found)
+    # The agent finds these itself, as it runs, so they are shown but never written to the settings.
+    for cl in package_compilers(APP_DIR):
+        cid = compiler_id(cl, refresh=True)
+        if cid not in seen or cid is None:
+            seen.add(cid)
+            rows.append({"kind": "compiler", "id": cid, "path": cl, "manual": False, "source": "패키지"})
     info, _ = probe_agent("127.0.0.1", port, token, timeout=0.5)
     listening = info is not None or port_in_use(port)
     return {"rows": rows, "listening": listening, "firewall": firewall_is_open(port, discovery_port),
@@ -421,28 +428,57 @@ def query_agents(addresses, discovery_port, token):
 
 
 def build_package(dest, compilers, report):
-    """Fills dest with what a helper PC needs. Returns the program names that could not be included."""
+    """Fills dest with what a helper PC needs. dest may also be a helper's package folder in use.
+
+    Returns {"missing": programs not found here, "busy": programs left as they were because they are running}.
+    """
     os.makedirs(dest, exist_ok=True)
     tools = find_tools_dir()
     folders = [APP_DIR] + ([os.path.join(tools, "dist")] if tools else [])
-    missing = []
+    result = {"missing": [], "busy": []}
     for name in PACKAGE_EXES:
         source = next((os.path.join(f, name) for f in folders if os.path.isfile(os.path.join(f, name))), None)
         if source is None:
-            missing.append(name)
+            result["missing"].append(name)
+            continue
+        target = os.path.join(dest, name)
+        if os.path.normcase(os.path.abspath(source)) == os.path.normcase(os.path.abspath(target)):
             continue
         report("복사 중: %s" % name)
-        target = os.path.join(dest, name)
-        if os.path.normcase(os.path.abspath(source)) != os.path.normcase(os.path.abspath(target)):
+        try:
             shutil.copy2(source, target)
+        except PermissionError:
+            if not os.path.isfile(target):
+                raise
+            result["busy"].append(name)
+            report("%s: 실행 중이라 기존 파일을 그대로 둡니다." % name)
     for cid, cl in compilers.items():
-        report("복사 중: %s" % cid)
         target = os.path.join(dest, "msvc", cid)
-        shutil.copytree(os.path.dirname(cl), target, dirs_exist_ok=True)
-        copied = compiler_id(os.path.join(target, "cl.exe"))
+        if os.path.isfile(os.path.join(target, "cl.exe")) and compiler_id(os.path.join(target, "cl.exe"), refresh=True) == cid:
+            report("이미 있음: %s" % cid)
+            continue
+        report("복사 중: %s" % cid)
+        # Copied under another name first, so a running agent never sees a half-copied compiler folder.
+        staging = os.path.join(dest, "msvc", ".copying-" + cid)
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.copytree(os.path.dirname(cl), staging)
+        copied = compiler_id(os.path.join(staging, "cl.exe"), refresh=True)
+        stop_vctip(staging)
         if copied != cid:
             raise RuntimeError("복사한 컴파일러의 ID가 다릅니다: %s, 원본 %s" % (copied, cid))
-    return missing
+        shutil.rmtree(target, ignore_errors=True)
+        os.replace(staging, target)
+    return result
+
+
+def stop_vctip(folder):
+    """cl.exe leaves its telemetry helper running, which keeps the folder it ran from locked."""
+    if IS_WINDOWS:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-Process vctip -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '%s*' } | "
+                        "Stop-Process -Force" % folder.replace("'", "''")],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.3)
 
 
 # --------------------------------------------------------------------------- Qt plumbing
@@ -638,12 +674,12 @@ class HelperPage(Page):
         self.scan()
 
     def pick_up_packaged_compilers(self):
-        """A package copied to this PC brings its compilers in a msvc folder beside the program."""
-        packaged = sorted(glob.glob(os.path.join(APP_DIR, "msvc", "*", "cl.exe")))
-        added = [p for p in packaged if p not in self.compilers]
-        if added:
-            self.compilers += added
-            self.log("패키지의 컴파일러 %d개를 목록에 추가했습니다." % len(added))
+        """The agent finds a package's compilers itself, so entries an older version saved are dropped."""
+        packaged = {os.path.normcase(p) for p in package_compilers(APP_DIR)}
+        kept = [p for p in self.compilers if os.path.normcase(os.path.abspath(p)) not in packaged]
+        if len(kept) != len(self.compilers):
+            self.log("패키지 폴더의 컴파일러는 에이전트가 직접 찾으므로 설정 파일에서 뺍니다 (저장하면 적용).")
+            self.compilers = kept
 
     def build_ui(self):
         c = self.loaded
@@ -808,7 +844,7 @@ class HelperPage(Page):
         labels = {"compiler": "컴파일러", "engine": "엔진"}
         for row in result["rows"]:
             identifier = row["id"] or "인식 실패"
-            add_table_row(table, [labels[row["kind"]], identifier, row["path"], "직접 추가" if row["manual"] else "자동"],
+            add_table_row(table, [labels[row["kind"]], identifier, row["path"], row["source"]],
                           row, color=None if row["id"] else (1, BAD), tooltip=row["path"])
         self.listening = result["listening"]
         self.autostart = result["autostart"]
@@ -939,7 +975,7 @@ class HelperPage(Page):
             self.work_dir.setText(os.path.normpath(folder))
 
     def add_compiler(self):
-        path, _ = QFileDialog.getOpenFileName(self, "cl.exe 선택", os.path.join(APP_DIR, "msvc"), "cl.exe (cl.exe)")
+        path, _ = QFileDialog.getOpenFileName(self, "cl.exe 선택", "", "cl.exe (cl.exe)")
         if path and os.path.normpath(path) not in self.compilers:
             self.compilers.append(os.path.normpath(path))
             self.scan()
@@ -952,8 +988,10 @@ class HelperPage(Page):
 
     def remove_selected(self):
         chosen = selected_data(self.offer_table)
-        if any(not row["manual"] for row in chosen):
+        if any(row["source"] == "자동" for row in chosen):
             self.log("자동으로 찾은 항목은 제거할 수 없습니다. 자동 찾기를 끄면 목록에서 빠집니다.")
+        if any(row["source"] == "패키지" for row in chosen):
+            self.log("패키지 컴파일러는 패키지 폴더(msvc 아래)에서 그 폴더를 지우면 빠집니다.")
         for row in chosen:
             if row["manual"]:
                 (self.compilers if row["kind"] == "compiler" else self.engines).remove(row["path"])
@@ -1073,8 +1111,9 @@ class DeveloperPage(Page):
         package_layout.addWidget(self.package_list)
         package_layout.addLayout(browse_row(self.package_dest, browse))
         package_layout.addLayout(button_row(self.package_button))
-        hint = QLabel("만든 폴더의 내용을 헬퍼 PC의 C:\\DistriBuild에 복사하고 DistriBuildSetup.exe를 실행하면 "
-                      "컴파일러가 자동으로 등록됩니다.")
+        hint = QLabel("새 헬퍼: 만든 폴더의 내용을 헬퍼 PC의 C:\\DistriBuild에 복사하고 DistriBuildSetup.exe를 실행하세요.\n"
+                      "이미 쓰는 헬퍼에 컴파일러 추가: 그 헬퍼의 패키지 폴더(예: \\\\헬퍼PC\\c$\\DistriBuild)를 바로 고르세요. "
+                      "실행 중인 에이전트가 1분 안에 새 컴파일러를 찾아 씁니다.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: %s" % NEUTRAL)
         package_layout.addWidget(hint)
@@ -1260,11 +1299,16 @@ class DeveloperPage(Page):
                 cid = item.data(Qt.ItemDataRole.UserRole)
                 chosen[cid] = self.compiler_paths[cid]
 
-        def finished(missing):
-            if missing:
-                self.log("[!!] 포함하지 못한 프로그램: %s (build_xgconsole.bat, build_setup_gui.bat으로 먼저 빌드하세요)" % ", ".join(missing))
+        def finished(result):
+            if result["missing"]:
+                self.log("[!!] 포함하지 못한 프로그램: %s (build_xgconsole.bat, build_setup_gui.bat으로 먼저 빌드하세요)"
+                         % ", ".join(result["missing"]))
+            if result["busy"]:
+                self.log("[!!] 실행 중이라 바꾸지 못한 프로그램: %s (헬퍼에서 에이전트를 멈춘 뒤 다시 만들면 바뀝니다)"
+                         % ", ".join(result["busy"]))
             self.log("[ok] 패키지를 만들었습니다: %s" % dest)
-            self.log("이 폴더의 내용을 헬퍼 PC의 C:\\DistriBuild에 복사하고 DistriBuildSetup.exe를 실행하세요.")
+            self.log("헬퍼의 패키지 폴더에 바로 만들었다면 실행 중인 에이전트가 1분 안에 새 컴파일러를 씁니다. "
+                     "아니면 이 폴더의 내용을 헬퍼 PC의 C:\\DistriBuild에 복사하세요.")
 
         self.log("패키지를 만드는 중입니다...")
         self.bus.start(lambda: build_package(dest, chosen, self.bus.line.emit), finished, self.package_button)

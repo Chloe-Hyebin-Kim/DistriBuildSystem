@@ -44,7 +44,19 @@ Python이 없는 PC에서 쓰려면 `pip install pyinstaller`까지 한 뒤 `bui
 | 헬퍼 PC | 에이전트 설정과 시작/중지, PC를 켜면 자동 시작(UAC), 방화벽 규칙(UAC), 제공 중인 컴파일러와 엔진 확인 |
 | 개발자 PC | xgConsole 빌드, 서비스 설치/제거(UAC), `--doctor`, 헬퍼 PC 검색과 컴파일러 일치 확인, 빌드 옵션, 헬퍼용 패키지 만들기 |
 
-**헬퍼 PC용 패키지**는 개발자 PC의 MSVC 복사본과 실행 파일을 한 폴더에 모읍니다. 그 폴더의 내용을 헬퍼 PC의 `C:\DistriBuild`에 복사하고 `DistriBuildSetup.exe`를 실행하면 컴파일러가 자동으로 등록됩니다.
+**헬퍼 PC용 패키지**는 개발자 PC의 MSVC 복사본과 실행 파일을 한 폴더에 모읍니다. 그 폴더의 내용을 헬퍼 PC의 `C:\DistriBuild`에 복사하고 `DistriBuildSetup.exe`를 실행하세요. 에이전트는 자기 옆 `msvc\<컴파일러 ID>\cl.exe`를 직접 찾으므로 설정 파일에 컴파일러를 적을 필요가 없습니다.
+
+### PC가 바뀌거나 늘어날 때
+
+| 상황 | 할 일 |
+|---|---|
+| 헬퍼 PC 추가 | 패키지를 복사하고 헬퍼 탭에서 토큰 → 방화벽 열기 → 자동 시작 켜기. 같은 네트워크의 개발자 PC는 다음 빌드부터 자동으로 찾습니다. |
+| 다른 서브넷의 헬퍼 | 개발자 탭에서 `IP:31890`을 **주소 추가**합니다. |
+| 헬퍼 PC 제거 | 그 PC에서 **자동 시작 끄기**. 고정한 주소가 있으면 개발자 탭에서 **선택 제거**합니다(남겨 두면 빌드마다 연결 시도로 몇 초를 씁니다). |
+| 개발자 PC 교체/추가 | 새 PC의 개발자 탭에서 설치하고 같은 토큰을 넣습니다. 헬퍼는 개발자 PC를 미리 알 필요가 없습니다. |
+| 새 개발자 PC의 MSVC 빌드 번호가 다름 | 새 PC에서 **헬퍼 PC용 패키지**의 대상 폴더로 헬퍼의 패키지 폴더(예: `\\헬퍼PC\c$\DistriBuild`)를 바로 고릅니다. 실행 중인 에이전트가 30초마다 `msvc` 폴더를 확인하므로 재시작 없이 1분 안에 새 컴파일러를 씁니다. 복사 중인 폴더는 파일이 더 바뀌지 않을 때까지 쓰지 않고, 지운 폴더는 목록에서 뺍니다. |
+
+개발자 탭의 **헬퍼 PC 찾기**는 헬퍼마다 이 PC와 일치하는 컴파일러와, 이 PC에 있지만 헬퍼에 없는 컴파일러를 보여 줍니다.
 
 창에서 시작한 에이전트는 창을 닫으면 함께 중지됩니다. 헬퍼 PC를 계속 헬퍼로 쓰려면 **자동 시작 켜기**를 누르세요.
 
@@ -135,17 +147,11 @@ robocopy "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MS
 robocopy "E:\DistriBuild" "C:\DistriBuild" /E
 ```
 
-**③-2. 설정 파일 `C:\DistriBuild\agent.json`을 만듭니다.** PowerShell에서 실행합니다. 복사한 컴파일러마다 경로를 한 줄씩 적습니다.
+**③-2. 설정 파일 `C:\DistriBuild\agent.json`을 만듭니다.** PowerShell에서 실행합니다.
 ```powershell
-Set-Content -Encoding utf8 C:\DistriBuild\agent.json @'
-{
-  "compilers": [
-    "C:/DistriBuild/msvc/msvc-19.44.35229-x64/cl.exe"
-  ]
-}
-'@
+Set-Content -Encoding utf8 C:\DistriBuild\agent.json '{}'
 ```
-컴파일러를 복사하지 않았다면 내용을 `{}`로 만듭니다. 이 PC에 설치된 엔진과 Visual Studio는 이 파일과 관계없이 자동으로 찾습니다. 나머지 키(`slots`, `token`, `work_dir`, `pch_cache_gb` 등)는 `agent.example.json`을 참고하세요.
+`DistriBuildAgent.exe` 옆 `msvc\<컴파일러 ID>\cl.exe`의 컴파일러, 이 PC에 설치된 엔진과 Visual Studio는 이 파일과 관계없이 자동으로 찾습니다. 실행 중에 `msvc` 아래에 폴더를 더 복사해도 1분 안에 씁니다. 다른 위치의 컴파일러만 `"compilers": ["D:/경로/cl.exe"]`로 적습니다. 나머지 키(`slots`, `token`, `work_dir`, `pch_cache_gb` 등)는 `agent.example.json`을 참고하세요.
 
 **③-3. 방화벽을 엽니다.** 관리자 권한 터미널에서 실행합니다. 규칙 이름은 설정 GUI가 쓰는 것과 같습니다.
 ```bash
@@ -190,8 +196,11 @@ Start-ScheduledTask -TaskName "DistriBuild Agent"
 
 | 할 일 | 명령 (관리자 PowerShell) |
 |---|---|
-| `agent.json`을 고친 뒤 다시 시작 | `Stop-ScheduledTask -TaskName "DistriBuild Agent"; Start-ScheduledTask -TaskName "DistriBuild Agent"` |
-| 자동 시작 끄기 | `Stop-ScheduledTask -TaskName "DistriBuild Agent"; Unregister-ScheduledTask -TaskName "DistriBuild Agent" -Confirm:$false` |
+| 자동 시작한 에이전트 끄기 | `Get-CimInstance Win32_Process \| ? CommandLine -like '*agent-autostart.log*' \| % { taskkill /PID $_.ProcessId /T /F }` |
+| `agent.json`을 고친 뒤 다시 시작 | 위 명령 다음에 `Start-ScheduledTask -TaskName "DistriBuild Agent"` |
+| 자동 시작 끄기 | 위 명령 다음에 `Unregister-ScheduledTask -TaskName "DistriBuild Agent" -Confirm:$false` |
+
+`Stop-ScheduledTask`만으로는 부족합니다. 작업이 시작한 프로세스만 끝나고, 실제 에이전트(한 파일 exe가 띄운 두 번째 프로세스)와 실행 중인 컴파일은 남습니다.
 
 SYSTEM 계정은 사용자 환경 변수(`UE_ROOT`, 사용자 PATH)를 보지 못합니다. 그렇게만 찾던 엔진이나 컴파일러는 `agent.json`의 `engines`, `compilers`에 적어 두세요.
 

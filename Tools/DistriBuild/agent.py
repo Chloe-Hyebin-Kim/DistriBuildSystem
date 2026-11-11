@@ -116,6 +116,28 @@ def detect_compilers(paths, auto):
     return compilers
 
 
+AGENT_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+PACKAGE_SCAN_SECONDS = 30
+
+
+def package_compilers(root):
+    """cl.exe of every compiler copied into a helper package: <root>/msvc/<compiler id>/cl.exe."""
+    return sorted(glob.glob(os.path.join(root, "msvc", "*", "cl.exe")))
+
+
+def folder_signature(folder):
+    """Changes while files are still being copied into folder."""
+    count = size = newest = 0
+    for base, _, files in os.walk(folder):
+        for name in files:
+            try:
+                st = os.stat(os.path.join(base, name))
+            except OSError:
+                continue
+            count, size, newest = count + 1, size + st.st_size, max(newest, st.st_mtime_ns)
+    return count, size, newest
+
+
 # --------------------------------------------------------------------------- agent
 
 class Agent:
@@ -136,6 +158,15 @@ class Agent:
         auto = cfg.get("auto_detect", True)
         self.engines = detect_engines(cfg.get("engines", []), auto)
         self.compilers = detect_compilers(cfg.get("compilers", []), auto)
+        # A helper package's compilers need no settings: copying a folder in is enough, even while running.
+        self.package_root = cfg.get("package_dir") or AGENT_DIR
+        self.packaged = {}          # cl.exe -> compiler id, for package folders in use
+        self.package_failed = {}    # cl.exe -> folder signature that did not give an id
+        for cl in package_compilers(self.package_root):
+            cid = compiler_id(cl)
+            if cid:
+                self.packaged[cl] = cid
+                self.compilers.setdefault(cid, cl)
         self.lock = threading.Lock()
         self.active = 0
         self.completed = 0
@@ -151,6 +182,46 @@ class Agent:
                 "compilers": sorted(self.compilers), "completed": self.completed,
                 "failed": self.failed, "uptime": int(time.time() - self.started),
             }
+
+    def rescan_package(self, previous):
+        """Adds package folders copied in since the last scan and drops removed ones.
+
+        previous holds each folder's signature from the last scan. A new folder is only used once its
+        signature is unchanged between two scans, so a copy still in progress is never offered.
+        """
+        current = {cl: folder_signature(os.path.dirname(cl)) for cl in package_compilers(self.package_root)}
+        compilers = dict(self.compilers)
+        changed = False
+        for cl, cid in list(self.packaged.items()):
+            if cl not in current:
+                del self.packaged[cl]
+                if compilers.get(cid) == cl:
+                    del compilers[cid]
+                    changed = True
+                    log("compiler removed, its package folder is gone: %s" % cid)
+        for cl in list(self.package_failed):
+            if cl not in current:
+                del self.package_failed[cl]
+        for cl, signature in current.items():
+            if cl in self.packaged or previous.get(cl) != signature or self.package_failed.get(cl) == signature:
+                continue
+            cid = compiler_id(cl, refresh=True)
+            if not cid:
+                self.package_failed[cl] = signature
+                log("WARNING: %s does not run as a compiler; copy its whole folder again" % cl)
+                continue
+            self.package_failed.pop(cl, None)
+            self.packaged[cl] = cid
+            if cid not in compilers:
+                compilers[cid] = cl
+                changed = True
+                log("compiler added from the package folder: %s -> %s" % (cid, cl))
+        previous.clear()
+        previous.update(current)
+        if changed:
+            with self.lock:
+                self.compilers = compilers
+        return changed
 
     def try_reserve(self):
         with self.lock:
@@ -454,6 +525,17 @@ class Server(socketserver.ThreadingTCPServer):
         super().server_bind()
 
 
+def package_watch_loop(agent):
+    previous = {}
+    agent.rescan_package(previous)
+    while True:
+        time.sleep(PACKAGE_SCAN_SECONDS)
+        try:
+            agent.rescan_package(previous)
+        except Exception as e:  # a scan must never stop the agent
+            log("package folder scan failed: %s" % e)
+
+
 def discovery_loop(agent):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -513,6 +595,7 @@ def main():
         return
 
     threading.Thread(target=discovery_loop, args=(agent,), daemon=True).start()
+    threading.Thread(target=package_watch_loop, args=(agent,), daemon=True).start()
     try:
         server = Server(("", agent.port), Handler)
     except OSError as e:
