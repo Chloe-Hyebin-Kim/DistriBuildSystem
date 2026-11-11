@@ -28,7 +28,7 @@ Incredibuild처럼 LAN의 여러 PC에 빌드 작업을 나눠 실행합니다. 
 
 ## GUI로 설정하기 (Qt)
 
-`Tools\DistriBuild\setup_gui.py`는 아래 1, 2장의 설정을 창에서 합니다. 같은 `agent.json`과 `client.json`을 편집하므로 명령줄 도구와 함께 쓸 수 있습니다.
+`Tools\DistriBuild\setup_gui.py`는 아래 "터미널로 설정하고 사용하기"의 ②~④를 창에서 합니다. 같은 `agent.json`과 `client.json`을 편집하므로 명령줄 도구와 함께 쓸 수 있습니다.
 
 ```bash
 pip install PySide6-Essentials
@@ -54,55 +54,296 @@ Python이 없는 PC에서 쓰려면 `pip install pyinstaller`까지 한 뒤 `bui
 - SYSTEM 계정은 사용자 환경 변수(`UE_ROOT`, 사용자 PATH)를 보지 못하므로 그렇게만 찾은 엔진과 컴파일러는 직접 추가해 두세요.
 - 작업은 보통보다 낮은 우선순위로 실행되어 헬퍼 PC를 쓰는 사람에게 방해가 덜 됩니다.
 
-## 1. 에이전트 설치 (헬퍼 PC마다)
+## 터미널로 설정하고 사용하기
 
-Python 3.9 이상이 필요합니다. Python이 없는 PC에는 `build_xgconsole.bat`으로 만든 `dist\DistriBuildAgent.exe`를 복사하면 됩니다.
+창(설정 GUI, 에디터 메뉴) 없이 명령만으로 설정하는 순서입니다. **① 개발자 PC에서 실행 파일 만들기 → ② 헬퍼 PC로 옮길 파일 준비 → ③ 헬퍼 PC 설정 → ④ C++ 분산 → ⑤ 셰이더 분산** 순서로 진행합니다. C++와 셰이더는 따로 동작하므로 필요한 쪽만 해도 됩니다.
+
+명령에 나오는 표기입니다.
+
+| 표기 | 뜻 | 예 |
+|---|---|---|
+| `<저장소>` | 이 저장소를 받은 폴더. 개발자 PC에만 있으면 됩니다 | `C:\dev\git\Chloe_dev\DistriBuildSystem` |
+| `<엔진>` | 엔진 설치 폴더 | `C:\Program Files\Epic Games\UE_5.8` |
+| `<프로젝트>` | `.uproject`가 있는 폴더 | `D:\Projects\MyGame` |
+| `<이름>` | 프로젝트 이름(`.uproject` 파일 이름) | `MyGame` |
+| `<헬퍼 IP>` | 헬퍼 PC의 IPv4 주소. 헬퍼 PC에서 `ipconfig`로 확인 | `192.168.0.21` |
+| `E:` | 파일을 옮길 USB 드라이브 | |
+
+설정이 끝나면 파일은 이렇게 놓입니다.
+
+| PC | 경로 | 내용 | 만드는 단계 |
+|---|---|---|---|
+| 개발자 | `<저장소>\Tools\DistriBuild\dist\` | `xgConsole.exe`, `DistriBuildAgent.exe` | ① |
+| 개발자 | `C:\DistriBuild\bin\` | UBT가 실행하는 `xgConsole.exe`, `Incredibuild Agent` 서비스용 `DistriBuildXgeShim.exe` | ④-1 |
+| 개발자 | `%USERPROFILE%\.distribuild\client.json` | C++ 작업을 보낼 헬퍼 PC 목록 | ④-2 |
+| 개발자 | `%USERPROFILE%\.distribuild\last_build.csv` | 마지막 빌드의 작업별 보고서 (자동 생성) | ④-4 |
+| 개발자 | `<프로젝트>\Plugins\DistriBuild\` | 셰이더 플러그인 | ⑤-1 |
+| 개발자 | `<프로젝트>\Config\DefaultEngine.ini` | 셰이더 작업을 보낼 헬퍼 PC 목록 | ⑤-3 |
+| 헬퍼 | `C:\DistriBuild\DistriBuildAgent.exe` | 에이전트 | ③-1 |
+| 헬퍼 | `C:\DistriBuild\agent.json` | 에이전트 설정 | ③-2 |
+| 헬퍼 | `C:\DistriBuild\msvc\<컴파일러 ID>\` | 개발자 PC에서 복사한 MSVC (필요할 때만) | ③-1 |
+
+설정 GUI의 "헬퍼용 패키지"도 같은 배치를 씁니다. 그래서 두 방식을 섞어 써도 됩니다.
+
+### ① 개발자 PC: 실행 파일 만들기
+
+Python 3.9 이상이 필요합니다. 한 번만 하면 되고, 저장소를 업데이트하면 다시 실행합니다.
 
 ```bash
-python agent.py --print-detected
+cd <저장소>
 ```
-감지된 엔진과 컴파일러를 확인합니다. Epic 런처로 설치한 엔진과 vswhere로 찾은 MSVC는 자동으로 감지됩니다. 소스 빌드 엔진은 `--engine <엔진 루트>`나 설정 파일의 `engines`에 추가합니다.
-
 ```bash
-python agent.py --config agent.json
+pip install pyinstaller
 ```
-설정 형식은 `agent.example.json`을 참고하세요. 방화벽에서 **TCP 31890**과 **UDP 31891**을 열어야 합니다. `--log <파일>`을 주면 출력을 파일에도 남깁니다. 같은 포트에 에이전트가 이미 있으면 두 번째 에이전트는 시작하지 않고 종료 코드 2로 끝납니다.
+```bash
+Tools\DistriBuild\build_xgconsole.bat
+```
 
-**에이전트에는 개발자 PC의 UBT가 고른 것과 같은 MSVC가 있어야 합니다.** 빌드 번호까지 같아야 하므로 팀 전체가 같은 버전을 쓰세요. UBT는 설치된 것 중 가장 새 버전을 고를 수 있습니다(`xgConsole --doctor`로 확인).
+`<저장소>\Tools\DistriBuild\dist\`에 `xgConsole.exe`와 `DistriBuildAgent.exe`가 생깁니다. 다시 빌드했다면 ④-1의 `install_client.bat`도 다시 실행해야 `C:\DistriBuild\bin`의 파일이 바뀝니다.
 
-## 2. C++ 분산 (개발자 PC)
+### ② 개발자 PC: 헬퍼 PC로 옮길 파일 준비
 
-**UBT는 `Incredibuild Agent`라는 Windows 서비스가 실행 중일 때만 XGE 실행기를 씁니다**(`XGE.IsAvailable`). 그래서 설치 단계에 관리자 권한이 한 번 필요합니다.
+**C++ 작업은 컴파일러 빌드 번호까지 같은 헬퍼 PC로만 보냅니다.** 헬퍼 PC에 같은 Visual Studio가 같은 버전으로 설치되어 있으면 컴파일러는 복사하지 않아도 됩니다. 셰이더만 분산한다면 ②-2의 에이전트만 복사하면 됩니다.
 
-1. `Tools\DistriBuild\build_xgconsole.bat`을 실행합니다(`pip install pyinstaller` 필요).
-2. **관리자 권한 명령 프롬프트**에서 `Tools\DistriBuild\install_client.bat`을 실행합니다.
-   - 아무 일도 하지 않는 `Incredibuild Agent` 서비스(`DistriBuildXgeShim.exe`)를 등록합니다.
-   - `xgConsole.exe`를 `C:\DistriBuild\bin`에 복사하고 PATH에 추가합니다.
-   - 실제 Incredibuild가 있으면 아무것도 바꾸지 않고 중단합니다. 되돌리려면 `uninstall_client.bat`을 실행합니다.
-3. 에이전트 목록이 필요하면 `%USERPROFILE%\.distribuild\client.json`을 만듭니다(`distribuild_client.example.json` 참고). 같은 서브넷이면 자동 검색으로 충분합니다.
-4. **새 터미널**에서 확인합니다.
-   ```bash
-   xgConsole --doctor
-   ```
-5. 평소처럼 빌드합니다. 로그에 `DistriBuild: N actions, X local slots, Y remote slots`가 나오면 연결된 것입니다. `BuildConfiguration.xml`은 바꿀 필요가 없습니다. 두 엔진 모두 기본값에서 XGE를 먼저 고릅니다.
+**②-1. 이 PC의 컴파일러를 확인합니다.**
+```bash
+Tools\DistriBuild\dist\DistriBuildAgent.exe --print-detected
+```
+```
+  compiler msvc-19.44.35229-x64
+           -> C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe
+```
+`msvc-...`가 컴파일러 ID이고, 그 아래 줄이 `cl.exe`의 경로입니다.
 
-원격 처리 규칙:
+UBT가 실제로 고르는 컴파일러는 `%LOCALAPPDATA%\UnrealBuildTool\Log.txt`의 `Using Visual Studio 14.44.35229 toolchain` 줄에서 볼 수 있습니다. 뒤쪽 숫자(`44.35229`)가 같은 ID가 그 컴파일러입니다. 잘 모르겠으면 `-x64`로 끝나는 컴파일러를 모두 복사하세요. `-x86`처럼 다른 대상용 컴파일러는 따로 떼어 쓰면 동작하지 않습니다.
+
+**②-2. USB로 복사합니다.** 컴파일러 폴더 이름은 컴파일러 ID로 합니다.
+```bash
+robocopy "<저장소>\Tools\DistriBuild\dist" "E:\DistriBuild" DistriBuildAgent.exe
+```
+```bash
+robocopy "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64" "E:\DistriBuild\msvc\msvc-19.44.35229-x64" /E
+```
+두 번째 명령은 복사할 컴파일러마다 경로와 ID를 바꿔 실행합니다(한 폴더 약 100MB).
+
+### ③ 헬퍼 PC 설정
+
+헬퍼 PC에는 Python, 저장소, 엔진 소스, 프로젝트가 필요 없습니다. **셰이더 작업도 받으려면** 개발자 PC와 패치 버전까지 같은 엔진(예: 5.8.4)을 에픽 런처로 설치해 두세요. `C:\Program Files\Epic Games\UE_*`에 있으면 자동으로 찾습니다.
+
+**③-1. USB에서 복사합니다.**
+```bash
+robocopy "E:\DistriBuild" "C:\DistriBuild" /E
+```
+
+**③-2. 설정 파일 `C:\DistriBuild\agent.json`을 만듭니다.** PowerShell에서 실행합니다. 복사한 컴파일러마다 경로를 한 줄씩 적습니다.
+```powershell
+Set-Content -Encoding utf8 C:\DistriBuild\agent.json @'
+{
+  "compilers": [
+    "C:/DistriBuild/msvc/msvc-19.44.35229-x64/cl.exe"
+  ]
+}
+'@
+```
+컴파일러를 복사하지 않았다면 내용을 `{}`로 만듭니다. 이 PC에 설치된 엔진과 Visual Studio는 이 파일과 관계없이 자동으로 찾습니다. 나머지 키(`slots`, `token`, `work_dir`, `pch_cache_gb` 등)는 `agent.example.json`을 참고하세요.
+
+**③-3. 방화벽을 엽니다.** 관리자 권한 터미널에서 실행합니다. 규칙 이름은 설정 GUI가 쓰는 것과 같습니다.
+```bash
+netsh advfirewall firewall add rule name="DistriBuild Agent TCP" dir=in action=allow protocol=TCP localport=31890 profile=domain,private
+```
+```bash
+netsh advfirewall firewall add rule name="DistriBuild Agent UDP" dir=in action=allow protocol=UDP localport=31891 profile=domain,private
+```
+이 규칙은 개인(Private)·도메인 네트워크에서만 적용됩니다. `Get-NetConnectionProfile`의 `NetworkCategory`가 `Public`이면 Windows 설정에서 네트워크를 개인으로 바꾸세요.
+
+**③-4. 감지된 내용을 확인합니다.**
+```bash
+cd C:\DistriBuild
+```
+```bash
+.\DistriBuildAgent.exe --config agent.json --print-detected
+```
+```
+DistriBuild agent 'BUILD-PC-07'  port=31890  slots=12
+  engine   5.8.4      C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\ShaderCompileWorker.exe
+  compiler msvc-19.44.35229-x64
+           -> C:/DistriBuild/msvc/msvc-19.44.35229-x64/cl.exe
+```
+②-1에서 확인한 컴파일러 ID가 그대로 나와야 합니다. 셰이더용이면 엔진 버전도 개발자 PC와 같아야 합니다.
+
+**③-5. 에이전트를 실행합니다.**
+```bash
+.\DistriBuildAgent.exe --config agent.json
+```
+이 창이 열려 있는 동안만 작업을 받습니다. `Ctrl+C`로 끕니다. 같은 포트에 이미 에이전트가 떠 있으면 바로 종료됩니다(종료 코드 2).
+
+**③-6. (선택) PC를 켜면 자동으로 시작합니다.** 관리자 권한 PowerShell에서 한 번 실행합니다. 로그인하지 않아도 SYSTEM 계정으로 실행되고, 시간 제한 없이 낮은 우선순위로 돌며 로그를 `C:\DistriBuild\agent-autostart.log`에 남깁니다.
+```powershell
+$a = New-ScheduledTaskAction -Execute "C:\DistriBuild\DistriBuildAgent.exe" -Argument '--config "C:\DistriBuild\agent.json" --log "C:\DistriBuild\agent-autostart.log"' -WorkingDirectory "C:\DistriBuild"
+$t = New-ScheduledTaskTrigger -AtStartup
+$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -Priority 7
+$p = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName "DistriBuild Agent" -Action $a -Trigger $t -Settings $s -Principal $p -Force
+Start-ScheduledTask -TaskName "DistriBuild Agent"
+```
+③-5에서 연 창이 있으면 먼저 닫으세요. 같은 포트를 쓰면 자동 시작한 에이전트가 바로 종료됩니다.
+
+| 할 일 | 명령 (관리자 PowerShell) |
+|---|---|
+| `agent.json`을 고친 뒤 다시 시작 | `Stop-ScheduledTask -TaskName "DistriBuild Agent"; Start-ScheduledTask -TaskName "DistriBuild Agent"` |
+| 자동 시작 끄기 | `Stop-ScheduledTask -TaskName "DistriBuild Agent"; Unregister-ScheduledTask -TaskName "DistriBuild Agent" -Confirm:$false` |
+
+SYSTEM 계정은 사용자 환경 변수(`UE_ROOT`, 사용자 PATH)를 보지 못합니다. 그렇게만 찾던 엔진이나 컴파일러는 `agent.json`의 `engines`, `compilers`에 적어 두세요.
+
+### ④ 개발자 PC: C++ 분산
+
+**④-1. 설치합니다.** 관리자 권한 터미널에서 한 번 실행합니다.
+```bash
+<저장소>\Tools\DistriBuild\install_client.bat
+```
+- `C:\DistriBuild\bin`에 `xgConsole.exe`를 복사하고 시스템 PATH에 추가합니다.
+- 아무 일도 하지 않는 `Incredibuild Agent` 서비스를 등록합니다. UBT는 이 이름의 서비스가 실행 중일 때만 XGE 실행기를 쓰고, 그 실행기가 PATH의 `xgConsole.exe`를 부릅니다.
+- 실제 Incredibuild가 설치되어 있으면 아무것도 바꾸지 않고 중단합니다.
+- 엔진 파일과 `BuildConfiguration.xml`은 바꾸지 않습니다.
+
+**④-2. 헬퍼 PC 목록을 적습니다.** 같은 서브넷이면 자동 검색(UDP 31891)으로도 찾지만, 주소를 적어 두는 편이 확실합니다. PowerShell에서 실행합니다.
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.distribuild" | Out-Null
+Set-Content -Encoding utf8 "$env:USERPROFILE\.distribuild\client.json" '{ "agents": ["<헬퍼 IP>:31890"] }'
+```
+헬퍼 PC가 여러 대면 `["192.168.0.21:31890", "192.168.0.22:31890"]`처럼 나열합니다. 다른 키는 `Tools\DistriBuild\distribuild_client.example.json`을 참고하세요.
+
+**④-3. 새 터미널을 열고 점검합니다.** PATH가 바뀌었으므로 꼭 새 터미널에서 실행합니다.
+```bash
+xgConsole --doctor
+```
+```
+Agents:
+  [ok] 12 remote slots [BUILD-PC-07(12)]
+Compilers on this PC:
+  [ok] msvc-19.44.35229-x64: 12 remote slots
+```
+`Agents`가 `[ok]`이고 UBT가 쓰는 컴파일러의 `remote slots`가 0보다 크면 준비가 끝난 것입니다. 그 컴파일러가 0이면 ②~③의 컴파일러 복사와 `agent.json`을 확인하세요.
+
+이 PC에 컴파일러가 여러 개 있으면, 헬퍼 PC에 복사하지 않은 컴파일러에 `[!!] ...: 0 remote slots`와 `No agent has msvc-...`가 나옵니다. UBT가 그 컴파일러를 쓰지 않으면 무시해도 됩니다. 이때 명령의 종료 코드도 1이 됩니다.
+
+**④-4. 빌드합니다.** Visual Studio에서 빌드해도 되고, 터미널에서는 엔진의 배치 파일을 씁니다.
+```bash
+"<엔진>\Engine\Build\BatchFiles\Build.bat" <이름>Editor Win64 Development -Project="<프로젝트>\<이름>.uproject" -WaitMutex
+```
+전체를 다시 빌드하려면 `Build.bat` 대신 `Rebuild.bat`을 씁니다. 인자는 같습니다.
+
+출력에서 확인할 줄입니다.
+```
+DistriBuild: 412 actions, 16 local slots, 12 remote slots [BUILD-PC-07(12)]
+...
+DistriBuild: finished in 312.4s
+  remote: 280   local: 132   skipped/not run: 0
+```
+- **`remote:`가 0보다 크면 분산된 것입니다.** 원격으로 가지 않은 작업은 이 요약 아래에 이유별로 나옵니다(→ [CHECKLIST.md](CHECKLIST.md)의 "이유별 대처").
+- **첫 빌드:** PCH(UE 5.8 에디터 기준 2.4GB)를 헬퍼 PC로 보내는 동안에는 로컬에서 많이 실행됩니다. 속도는 두 번째 빌드부터 비교하세요.
+- **작은 빌드:** 내 PC 코어를 먼저 채우므로 원격으로 안 나가는 것이 정상입니다. UE 5.8은 작업 수가 코어 수보다 적으면 UBT가 DistriBuild 대신 로컬 UBA로 빌드합니다.
+- **`DistriBuild:` 줄이 없음:** UBT가 XGE를 고르지 않은 것입니다. `xgConsole --doctor`를 다시 확인하세요.
+
+**④-5. 상태를 더 보고 싶을 때**
+
+| 명령 | 내용 |
+|---|---|
+| `type "%USERPROFILE%\.distribuild\last_build.csv"` | 마지막 빌드의 작업별 실행 위치와 이유 |
+| `xgConsole --analyze "%USERPROFILE%\.distribuild\last_tasks.xml"` | 빌드 없이, 마지막 빌드에서 분산 가능한 작업 분석 |
+| `python <저장소>\Tools\DistriBuild\monitor.py <헬퍼 IP>:31890 --watch` | 헬퍼 PC별 슬롯, 진행 중, 완료, 실패 수를 계속 표시 |
+
+**④-6. 끄거나 제거할 때**
+- **이번 터미널에서만 로컬 빌드:** PowerShell에서 `$env:DISTRIBUILD_DISABLE=1`을 실행한 뒤 같은 창에서 빌드합니다. cmd에서는 `set DISTRIBUILD_DISABLE=1`입니다.
+- **완전히 제거:** 관리자 권한 터미널에서 `<저장소>\Tools\DistriBuild\uninstall_client.bat`을 실행합니다.
+
+### ⑤ 개발자 PC: 셰이더 분산
+
+셰이더 분산은 ④와 따로 동작합니다. 셰이더만 쓸 거면 ④는 하지 않아도 됩니다. 헬퍼 PC에는 같은 버전의 엔진이 있어야 합니다(③).
+
+**⑤-1. 프로젝트에 플러그인을 복사합니다.** C++ 프로젝트 기준입니다.
+```bash
+robocopy "<저장소>\Plugin\DistriBuild" "<프로젝트>\Plugins\DistriBuild" /E /XD Binaries Intermediate
+```
+블루프린트 전용 프로젝트는 플러그인을 컴파일할 수 없습니다. `Tools\BuildPlugin.bat "<엔진>"`으로 미리 빌드한 뒤, 생긴 `<저장소>\Build\UE_5.8` 폴더(엔진에 따라 이름이 다름)를 `<프로젝트>\Plugins\DistriBuild`로 복사하세요. 이렇게 미리 빌드한 플러그인을 프로젝트에 넣어 실행하는 경우는 아직 시험하지 못했습니다.
+
+**⑤-2. `.uproject`에서 플러그인을 켭니다.** 기본으로 꺼져 있습니다. 메모장 같은 편집기로 `<프로젝트>\<이름>.uproject`를 열어 `"Plugins"` 배열에 항목을 추가합니다. 배열이 없으면 새로 만듭니다.
+```json
+"Plugins": [
+  { "Name": "DistriBuild", "Enabled": true }
+]
+```
+
+**⑤-3. 헬퍼 PC 주소를 적습니다.** `<프로젝트>\Config\DefaultEngine.ini` 끝에 추가합니다. 플러그인은 ④-2의 `client.json`을 읽지 않습니다.
+```ini
+[/Script/DistriBuildEditor.DistriBuildSettings]
++Agents=<헬퍼 IP>:31890
+```
+같은 서브넷이면 자동 검색으로도 찾습니다. 파일을 고치지 않고 실행할 때마다 지정하려면 에디터나 쿠킹 명령에 `-DistriBuildAgents=<헬퍼 IP>:31890`을 붙입니다(여러 대는 쉼표로 구분).
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `bEnabled` | `True` | `False`면 끔 |
+| `bAutoDiscovery` | `True` | UDP 31891로 헬퍼 PC 자동 검색 |
+| `MaxRemoteJobs` | `128` | 동시에 보내는 셰이더 작업 수 |
+| `AuthToken` | 비어 있음 | 헬퍼 PC `agent.json`의 `token`과 같아야 함 |
+| `bFallbackToLocal` | `True` | 원격 실패나 빈 슬롯 없음일 때 로컬로 컴파일 |
+
+**⑤-4. 에디터를 빌드합니다.** 플러그인이 프로젝트와 함께 컴파일됩니다.
+```bash
+"<엔진>\Engine\Build\BatchFiles\Build.bat" <이름>Editor Win64 Development -Project="<프로젝트>\<이름>.uproject" -WaitMutex
+```
+
+**⑤-5. 쿠킹으로 확인합니다.** **에이전트를 먼저 켜 두세요.** 엔진은 시작할 때 한 번만 헬퍼 PC를 확인하고, 없으면 그 실행이 끝날 때까지 로컬로만 컴파일합니다.
+
+이미 컴파일한 셰이더는 캐시(DDC)에서 꺼내므로 다시 컴파일하지 않습니다. 확인할 때는 비어 있는 캐시를 쓰도록 `DefaultEngine.ini`에 시험용 캐시를 추가합니다.
+```ini
+[DistriBuildTestDDC]
+MinimumDaysToKeepFile=7
+Root=(Type=KeyLength, Length=120, Inner=AsyncPut)
+AsyncPut=(Type=AsyncPut, Inner=Hierarchy)
+Hierarchy=(Type=Hierarchical, Inner=Local)
+Local=(Type=FileSystem, Path="%GAMEDIR%DerivedDataCache/Test")
+```
+
+UE 5.8:
+```bash
+"<엔진>\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "<프로젝트>\<이름>.uproject" -run=Cook -TargetPlatform=Windows -unattended -nopause -stdout -UTF8Output -DDC=DistriBuildTestDDC | findstr /I "DistriBuild"
+```
+UE 4.26:
+```bash
+"<엔진>\Engine\Binaries\Win64\UE4Editor-Cmd.exe" "<프로젝트>\<이름>.uproject" -run=Cook -TargetPlatform=WindowsNoEditor -unattended -nopause -stdout -UTF8Output -DDC=DistriBuildTestDDC | findstr /I "DistriBuild"
+```
+
+출력에서 확인할 줄입니다.
+```
+DistriBuild: 12 remote shader slots for engine 5.8.4
+Using DistriBuild for shader compilation
+...
+DistriBuild: shader jobs: 1232 remote, 0 remote failures, 15 local (15 no free agent, 0 after remote failure)
+```
+UE 4.26에서는 가운데 줄이 `Using DistriBuild for Shader Compilation.`입니다. 마지막 줄은 쿠킹이 끝나 프로세스가 종료될 때 나옵니다. 시험이 끝나면 `-DDC=DistriBuildTestDDC` 없이 평소처럼 쿠킹하고, `<프로젝트>\DerivedDataCache\Test` 폴더는 지워도 됩니다.
+
+| 출력 | 원인 | 조치 |
+|---|---|---|
+| `0 remote shader slots ... stays off` | 에이전트 꺼짐, 방화벽, 주소, 엔진 버전 불일치 | 헬퍼 PC에서 ③-4로 엔진 버전 확인, 에이전트 실행 후 다시 실행 |
+| `Using UBA ...` (5.8) | `-UBA`나 Horde 설정 때문에 UBA가 우선 선택됨 | 그 설정을 끔 |
+| `DistriBuild` 줄이 하나도 없음 | 플러그인이 꺼져 있거나 빌드되지 않음 | ⑤-2와 ⑤-4 확인 |
+| `remote failures`가 계속 늘어남 | 원격 실패 후 로컬에서 다시 컴파일함 | 헬퍼 PC의 에이전트 창이나 `agent-autostart.log` 확인 |
+
+에디터를 평소처럼 쓸 때도 같은 방식으로 분산됩니다. 로그는 `<프로젝트>\Saved\Logs\<이름>.log`에 남습니다.
+```bash
+findstr /I "DistriBuild" "<프로젝트>\Saved\Logs\<이름>.log"
+```
+에디터나 쿠킹 명령에 `-NoDistriBuild`를 붙이면 그 실행에서만 꺼집니다.
+
+### C++ 원격 처리 규칙
+
 - 원격으로 보내는 것은 컴파일(`/c`)만입니다. 링크, PCH 생성(`/Yc`), `/analyze`, C++20 모듈은 로컬에서 실행합니다.
 - **PCH는 에이전트로 복사해 재사용합니다.** MSVC PCH는 같은 컴파일러 빌드면 다른 위치에서도 열립니다. 한 번 올린 뒤로는 작업마다 PCH 뒤쪽 텍스트(UE 소스 파일 기준 수 KB)만 보내므로, 원격 컴파일 속도가 로컬과 비슷합니다.
 - UE 기본값인 `/Z7`에서는 원격 `.obj`가 로컬 PCH `.obj`와 그대로 링크됩니다. `/Zi`로 만든 PCH는 `.pdb`가 있어야 열리므로 공유하지 않고, 헤더 전체를 텍스트로 보내며 `/Z7`로 컴파일합니다. 이 경우는 파일마다 훨씬 느립니다.
 - `/external:W0`는 전처리 파일 안의 경고 영역으로 재현합니다. SDK·서드파티 헤더 경고는 숨기고, 프로젝트 코드의 경고와 오류는 그대로 UBT에 전달합니다.
 - 의존성 파일은 로컬 전처리의 `/showIncludes` 결과로 다시 만듭니다. 4.26의 `cl-filter` `.txt`와 5.8의 `/sourceDependencies` `.json`을 모두 지원합니다. 한국어 VS처럼 영어 언어 팩이 없는 설치에서도 동작합니다.
-
-## 3. 셰이더 분산 (UE 플러그인)
-
-1. `Plugin/DistriBuild`를 프로젝트의 `Plugins/` 폴더(또는 `Engine/Plugins/`)에 복사하고 플러그인을 활성화합니다.
-2. **Project Settings → Plugins → DistriBuild**에서 에이전트를 추가합니다(`host` 또는 `host:port`). 같은 서브넷이면 자동 검색으로 충분합니다. 설정은 `DefaultEngine.ini`에 저장되어 팀 전체가 공유합니다.
-3. 에디터를 재시작합니다. 출력 로그에 `Using DistriBuild for shader compilation`이 나오면 사용 중입니다.
-4. **Window → Developer Tools → DistriBuild Monitor**, 또는 콘솔 명령 `DistriBuild.Stats`로 상태를 봅니다.
-
-명령줄 옵션: `-DistriBuildAgents=10.0.0.5,10.0.0.6:31890`, `-DistriBuildToken=...`, `-NoDistriBuild`
-
-쿠킹 커맨드릿(`-run=Cook`)에서도 같은 방식으로 동작합니다.
 
 ## 보안
 
