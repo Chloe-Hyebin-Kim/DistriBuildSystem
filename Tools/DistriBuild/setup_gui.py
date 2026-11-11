@@ -16,6 +16,7 @@ import html
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -39,7 +40,7 @@ try:
     from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, Qt, QTimer, Signal, Slot
     from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QDoubleSpinBox,
-                                   QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+                                   QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
                                    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
                                    QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                    QTabWidget, QVBoxLayout, QWidget)
@@ -425,6 +426,46 @@ def query_agents(addresses, discovery_port, token):
         checked, error = probe_agent(host, port, token)
         rows.append({"address": "%s:%d" % (host, port), "pinned": False, "info": checked or info, "error": error})
     return rows
+
+
+TOKEN_REASONS = {
+    "auth": "현재 토큰이 맞지 않음",
+    "no_token": "헬퍼에 토큰이 없음 (그 PC에서 직접 설정)",
+    "token_on_command_line": "--token으로 실행 중 (그 PC에서 직접 변경)",
+    "no_config": "설정 파일 없이 실행 중 (그 PC에서 직접 변경)",
+    "bad_token": "쓸 수 없는 토큰 (공백 없이 256자 이하)",
+    "expected reserve": "헬퍼 프로그램이 이전 버전 (새 DistriBuildAgent.exe 필요)",
+}
+
+
+def valid_token(token):
+    return bool(token) and len(token) <= 256 and not any(ord(c) < 32 or c.isspace() for c in token)
+
+
+def change_agent_token(host, port, old, new, timeout=5.0):
+    """Asks one agent to switch to a new token. Returns (ok, Korean reason when not)."""
+    try:
+        reply, _ = request(host, port, {"type": "set_token", "token": old, "new_token": new}, timeout=timeout)
+    except (OSError, ValueError):
+        return False, "연결 실패"
+    if reply.get("ok"):
+        return True, ""
+    reason = str(reply.get("reason", ""))
+    return False, TOKEN_REASONS.get(reason) or ("저장 실패: " + reason[13:] if reason.startswith("save_failed") else reason)
+
+
+def change_all_tokens(addresses, discovery_port, old, new):
+    """Every helper this PC can find, each with (ok, reason) after asking it to switch to new."""
+    results = []
+    for row in query_agents(addresses, discovery_port, old):
+        name = (row["info"] or {}).get("name", "")
+        if not row["info"] or row["error"]:
+            results.append({"address": row["address"], "name": name, "ok": False, "reason": row["error"] or "응답 없음"})
+            continue
+        host, port = parse_agent_address(row["address"])
+        ok, reason = change_agent_token(host, port, old, new)
+        results.append({"address": row["address"], "name": name, "ok": ok, "reason": reason})
+    return results
 
 
 def build_package(dest, compilers, report):
@@ -823,6 +864,12 @@ class HelperPage(Page):
         return data
 
     def save(self):
+        # A developer PC may have changed the token remotely since this window read the file.
+        on_disk = read_config(self.config_path, self.log).get("token", "")
+        if on_disk != self.loaded.get("token", "") and self.token.text() == self.loaded.get("token", ""):
+            self.token.setText(on_disk)
+            self.loaded["token"] = on_disk
+            self.log("토큰이 다른 곳(개발자 PC의 일괄 변경)에서 바뀌어 새 토큰을 유지합니다.")
         data = self.current_config()
         write_config(self.config_path, data)
         self.loaded = data
@@ -1015,6 +1062,7 @@ class DeveloperPage(Page):
         self.addresses = list(self.loaded.get("agents", []))
         self.compiler_paths = {}
         self.agent_rows = []
+        self.token_box = None
         self.tools = find_tools_dir()
         self.build_ui()
         self.refresh_status()
@@ -1065,8 +1113,11 @@ class DeveloperPage(Page):
         self.retry_local.setChecked(bool(c.get("retry_remote_failures_locally", True)))
         self.verbose = QCheckBox("로컬로 돌린 이유를 빌드 로그에 출력")
         self.verbose.setChecked(bool(c.get("verbose", False)))
+        self.token_button = QPushButton("모든 헬퍼 토큰 바꾸기")
+        self.token_button.setToolTip("찾을 수 있는 헬퍼의 토큰을 한 번에 바꾸고 이 PC에도 저장합니다.")
+        self.token_button.clicked.connect(lambda: self.change_tokens())
         options = QFormLayout()
-        options.addRow("토큰", self.token)
+        options.addRow("토큰", browse_row(self.token, self.token_button))
         options.addRow("로컬 동시 작업 수", self.max_local)
         options.addRow("동시 전처리 수", self.max_preprocess)
         options.addRow("UDP 검색 포트", self.discovery_port)
@@ -1159,6 +1210,50 @@ class DeveloperPage(Page):
         write_config(self.config_path, data)
         self.loaded = data
         self.log("[ok] 저장했습니다: %s" % self.config_path)
+
+    def change_tokens(self, new=None):
+        """Switches every helper this PC can reach to a new token, then this PC. new=None asks for it."""
+        old = self.token.text()
+        if not old:
+            self.log("[!!] 이 PC의 토큰이 비어 있습니다. 토큰이 없는 헬퍼는 원격으로 바꿀 수 없으니 헬퍼마다 먼저 설정하세요.")
+            return
+        if new is None:
+            new, ok = QInputDialog.getText(self, "모든 헬퍼 토큰 바꾸기",
+                                           "새 토큰 (비워 두면 무작위로 만듭니다)\n지금 토큰을 아는 헬퍼만 바뀝니다. 꺼져 있는 헬퍼는 나중에 직접 바꿔야 합니다.")
+            if not ok:
+                return
+            new = new.strip() or secrets.token_urlsafe(18)
+        if not valid_token(new):
+            self.log("[!!] " + TOKEN_REASONS["bad_token"])
+            return
+        if new == old:
+            self.log("새 토큰이 지금 토큰과 같습니다.")
+            return
+        addresses, port = list(self.addresses), self.discovery_port.value()
+        self.log("헬퍼 토큰을 바꾸는 중입니다...")
+        self.bus.start(lambda: change_all_tokens(addresses, port, old, new),
+                       lambda results: self.tokens_changed(results, new), self.token_button)
+
+    def tokens_changed(self, results, new):
+        done = [r for r in results if r["ok"]]
+        failed = [r for r in results if not r["ok"]]
+        for r in results:
+            label = "%s (%s)" % (r["name"] or "?", r["address"])
+            self.log("[ok] %s: 바꿈" % label if r["ok"] else "[!!] %s: %s" % (label, r["reason"]))
+        if not done:
+            self.log("[!!] 토큰을 바꾼 헬퍼가 없어 이 PC의 토큰도 그대로 둡니다.")
+            return
+        self.token.setText(new)
+        self.save()
+        text = "헬퍼 %d대 중 %d대의 토큰을 바꾸고 이 PC에도 저장했습니다.\n\n새 토큰: %s\n\n다른 개발자 PC의 개발자 탭에도 이 토큰을 넣고 저장하세요." % (
+            len(results), len(done), new)
+        if failed:
+            text += "\n\n바꾸지 못한 헬퍼는 그 PC의 헬퍼 탭에서 직접 바꾸세요:\n" + "\n".join(
+                "%s (%s): %s" % (r["name"] or "?", r["address"], r["reason"]) for r in failed)
+        self.token_box = QMessageBox(QMessageBox.Icon.Information, "토큰을 바꿨습니다", text, parent=self)
+        self.token_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.token_box.open()
+        self.find_agents()
 
     def install_folder(self):
         return self.bin_dir.text().strip().rstrip("\\/")

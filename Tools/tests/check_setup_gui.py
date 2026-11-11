@@ -25,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.normpath(os.path.join(HERE, "..", "DistriBuild"))
 PORT, DISCOVERY = 31990, 31991
 PACKAGE_PORT = 31996
+FIXED_PORT = 31997
 TOKEN = "gui-test-token"
 
 parser = argparse.ArgumentParser()
@@ -155,6 +156,35 @@ def main():
     pool = xgconsole.AgentPool(cfg)
     check(pool.capacity() == 3, "xgConsole's agent pool sees the agent once (%d slots)" % pool.capacity())
 
+    print("Changing every helper's token:")
+    fixed = subprocess.Popen([sys.executable, os.path.join(TOOLS, "agent.py"), "--port", str(FIXED_PORT), "--token", TOKEN,
+                              "--no-auto-detect"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        check(pump(lambda: gui.port_in_use(FIXED_PORT), 60), "a second helper, started with --token, is running")
+        developer.addresses.append("127.0.0.1:%d" % FIXED_PORT)
+        new_token = "changed-token-1"
+        developer.change_tokens(new_token)
+        check(pump(lambda: developer.token_box is not None and settled(developer.token_button), 60), "the change finishes")
+        check(gui.probe_agent("127.0.0.1", PORT, new_token)[0] is not None and gui.probe_agent("127.0.0.1", PORT, TOKEN)[0] is None,
+              "the running helper takes the new token at once, without a restart")
+        with open(agent_json, encoding="utf-8") as f:
+            saved = json.load(f)
+        check(saved.get("token") == new_token and saved.get("custom_key") == 1, "it saves it to its agent.json, keeping the rest")
+        check(xgconsole.load_config()["token"] == new_token, "this PC saves the new token too")
+        box = developer.token_box.text() if developer.token_box else ""
+        check("2대 중 1대" in box and new_token in box and "--token으로 실행 중" in box,
+              "the summary shows the new token and the helper that could not change")
+        developer.token_box.close()
+        helper.save()
+        with open(agent_json, encoding="utf-8") as f:
+            check(json.load(f).get("token") == new_token and helper.token.text() == new_token,
+                  "saving on the helper does not put the old token back")
+    finally:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(fixed.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixed.wait(10)
+    developer.addresses.remove("127.0.0.1:%d" % FIXED_PORT)
+    developer.save()
+
     print("Pictures:")
     if args.screens:
         os.makedirs(args.screens, exist_ok=True)
@@ -205,6 +235,8 @@ def main():
     previous = {}
     agent.rescan_package(previous)
     check(agent.compilers == {}, "an agent with an empty package starts with no compilers")
+    check(agent.set_token("lock-out", "test") == {"ok": False, "reason": "no_token"},
+          "a helper without a token cannot be locked by someone setting one remotely")
     target = os.path.join(later, "msvc", cid)
     os.makedirs(target)
     shutil.copy2(cl, target)  # cl.exe alone: the rest of the folder is still "being copied"

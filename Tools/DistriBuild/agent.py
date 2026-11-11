@@ -147,6 +147,9 @@ class Agent:
         self.discovery_port = int(cfg.get("discovery_port", DISCOVERY_PORT))
         self.slots = max(1, int(cfg.get("slots") or os.cpu_count() or 4))
         self.token = cfg.get("token", "")
+        self.config_path = None     # set by main(): where a remote token change is saved
+        self.token_fixed = False    # True when --token overrides the file
+        self.config_lock = threading.Lock()
         self.job_timeout = float(cfg.get("job_timeout", 600))
         self.work_root = cfg.get("work_dir") or os.path.join(tempfile.gettempdir(), "DistriBuildAgent")
         self.bundle_root = os.path.join(self.work_root, "source_bundles")
@@ -182,6 +185,37 @@ class Agent:
                 "compilers": sorted(self.compilers), "completed": self.completed,
                 "failed": self.failed, "uptime": int(time.time() - self.started),
             }
+
+    def set_token(self, new_token, requested_by):
+        """Replaces the token on request of a client that knows the current one, and saves it.
+
+        An agent without a token is open to everyone, so it cannot be locked this way: set the first
+        token on that PC. A token given with --token would come back on restart, so it is refused too.
+        """
+        if not self.token:
+            return {"ok": False, "reason": "no_token"}
+        if self.token_fixed:
+            return {"ok": False, "reason": "token_on_command_line"}
+        if not self.config_path:
+            return {"ok": False, "reason": "no_config"}
+        if (not isinstance(new_token, str) or not new_token or len(new_token) > 256
+                or any(ord(c) < 32 or c.isspace() for c in new_token)):
+            return {"ok": False, "reason": "bad_token"}
+        with self.config_lock:
+            try:
+                with open(self.config_path, "r", encoding="utf-8-sig") as f:
+                    saved = json.load(f)
+                saved["token"] = new_token
+                temp = self.config_path + ".tmp"
+                with open(temp, "w", encoding="utf-8") as f:
+                    json.dump(saved, f, indent=2, ensure_ascii=False)
+                    f.write("\n")
+                os.replace(temp, self.config_path)
+            except (OSError, ValueError) as e:
+                return {"ok": False, "reason": "save_failed: %s" % e}
+            self.token = new_token
+        log("token changed on request from %s" % requested_by)
+        return {"ok": True}
 
     def rescan_package(self, previous):
         """Adds package folders copied in since the last scan and drops removed ones.
@@ -462,6 +496,9 @@ class Handler(socketserver.BaseRequestHandler):
             if kind == "info":
                 send_frame(sock, agent.info())
                 return
+            if kind == "set_token":
+                send_frame(sock, agent.set_token(hdr.get("new_token"), self.client_address[0]))
+                return
             if kind != "reserve":
                 send_frame(sock, {"ok": False, "reason": "expected reserve"})
                 return
@@ -584,6 +621,8 @@ def main():
         cfg["auto_detect"] = False
 
     agent = Agent(cfg)
+    agent.config_path = os.path.abspath(args.config) if args.config else None
+    agent.token_fixed = args.token is not None
     log("DistriBuild agent '%s'  port=%d  slots=%d" % (agent.name, agent.port, agent.slots))
     for k, v in sorted(agent.engines.items()):
         log("  engine   %-10s %s" % (k, v))
