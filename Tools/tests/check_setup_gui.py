@@ -289,7 +289,7 @@ def main():
     with open(os.path.join(package, "agent.json"), encoding="utf-8") as f:
         check(json.load(f) == {}, "a new package has its own empty settings file")
     with open(os.path.join(package, gui.MANUAL), encoding="utf-8") as f:
-        check("보내는 사람" in f.read(), "and the manual for whoever gets it")
+        check("준비하는 사람" in f.read(), "and the manual for whoever gets it")
     original_app_dir = gui.APP_DIR
     gui.APP_DIR = package
     again = os.path.join(work, "package from a package")
