@@ -505,8 +505,7 @@ def build_package(dest, compilers, report):
     # A new package gets its own settings file, so the helper keeps its settings and log beside the programs.
     # A helper's folder already in use is left as it is: it may keep its settings in the user's profile.
     config = os.path.join(dest, "agent.json")
-    in_use = any(os.path.isfile(os.path.join(dest, name)) for name in (PROGRAM, "DistriBuildAgent.exe"))
-    if not in_use and not os.path.isfile(config):
+    if not os.path.isfile(os.path.join(dest, PROGRAM)) and not os.path.isfile(config):
         with open(config, "w", encoding="utf-8") as f:
             f.write("{}\n")
         report("빈 설정 파일을 만들었습니다: agent.json")

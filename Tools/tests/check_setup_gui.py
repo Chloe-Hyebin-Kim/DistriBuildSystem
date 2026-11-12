@@ -451,7 +451,7 @@ def main():
         check(pump(lambda: helper.autostart is not None and settled(helper.rescan_button)), "a registered task is noticed")
         check("켜짐" in helper.autostart_status.text() and helper.autostart_on_button.text().startswith("설정 적용해 다시 시작")
               and helper.autostart_off_button.isEnabled(), "it shows as on, with restart and off buttons")
-        gui.autostart_query = lambda: {"command": r"D:\old\DistriBuildAgent.exe", "arguments": "--config x", "log": r"D:\old\a.log"}
+        gui.autostart_query = lambda: {"command": r"D:\old\DistriBuild.exe", "arguments": "agent --config x", "log": r"D:\old\a.log"}
         helper.scan()
         pump(lambda: helper.autostart["command"].startswith("D:") and settled(helper.rescan_button))
         check(helper.autostart_on_button.text().startswith("이 위치로 다시 등록"), "a task left by a moved package is pointed out")
