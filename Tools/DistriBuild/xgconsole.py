@@ -2,8 +2,8 @@
 """DistriBuild xgConsole replacement for UnrealBuildTool.
 
 UBT's XGE executor writes every action of a build into an XGE task XML and runs
-`xgConsole.exe <file.xml> /Rebuild /NoLogo ...`. Building this script as xgConsole.exe
-(see build_xgconsole.bat), putting it on PATH and installing the service UBT checks for
+`xgConsole.exe <file.xml> /Rebuild /NoLogo ...`. Building this script into DistriBuild.exe
+(see build.bat and distribuild.py), installing a copy named xgConsole.exe on PATH and the service UBT checks for
 (see install_client.bat) makes UBT hand the whole build graph to DistriBuild, which then:
 
   * runs actions in dependency order using every local core,
@@ -1093,7 +1093,8 @@ def doctor(cfg):
     on_path = shutil.which("xgConsole")
     me = os.path.abspath(sys.executable if getattr(sys, "frozen", False) else "")
     check(bool(on_path), "xgConsole on PATH: %s" % on_path, "Put xgConsole.exe in a folder on PATH (install_client.bat does this).")
-    if on_path and getattr(sys, "frozen", False):
+    # DistriBuild.exe run under its own name is the package's copy, not the one installed for UBT.
+    if on_path and getattr(sys, "frozen", False) and os.path.splitext(os.path.basename(me))[0].lower() == "xgconsole":
         check(os.path.normcase(os.path.abspath(on_path)) == os.path.normcase(me), "PATH resolves to this DistriBuild xgConsole",
               "Another xgConsole.exe comes first on PATH: %s" % on_path)
     for path in (os.path.join(os.environ.get("APPDATA", ""), "Unreal Engine", "UnrealBuildTool", "BuildConfiguration.xml"),

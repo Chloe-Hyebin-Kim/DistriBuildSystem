@@ -3,7 +3,7 @@
 
     python check_autostart.py [--exe]
 
---exe runs dist/DistriBuildAgent.exe (build it first) instead of agent.py, as a copied package does.
+--exe runs dist/DistriBuild.exe agent (build it first) instead of agent.py, as a copied package does.
 
 Registers a real Task Scheduler task under a test name, but for the current user instead of SYSTEM
 and without the boot trigger (both need elevation). Everything else is the XML the setup window
@@ -66,8 +66,8 @@ def main():
     gui.AUTOSTART_TASK = TASK
     if "--exe" in sys.argv:
         gui.FROZEN, gui.APP_DIR = True, os.path.join(TOOLS, "dist")
-        if not os.path.isfile(os.path.join(gui.APP_DIR, "DistriBuildAgent.exe")):
-            sys.exit("Build dist/DistriBuildAgent.exe first (build_xgconsole.bat).")
+        if not os.path.isfile(os.path.join(gui.APP_DIR, gui.PROGRAM)):
+            sys.exit("Build dist/DistriBuild.exe first (build.bat).")
     try:
         config = os.path.join(work, "agent.json")
         with open(config, "w", encoding="utf-8") as f:

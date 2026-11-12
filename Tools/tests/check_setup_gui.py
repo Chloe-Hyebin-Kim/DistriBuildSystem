@@ -283,9 +283,9 @@ def main():
     check(pump(lambda: settled(developer.package_button), 180), "the package finishes")
     copied = os.path.join(package, "msvc", cid, "cl.exe")
     check(os.path.isfile(copied) and compiler_id(copied) == cid, "the packaged compiler keeps its id")
-    check(os.path.isfile(os.path.join(package, "DistriBuildAgent.exe")), "the agent program is included")
+    check(os.path.isfile(os.path.join(package, gui.PROGRAM)), "the one program is included")
     check(all(os.path.isfile(os.path.join(package, name)) for name in gui.PACKAGE_DEVELOPER_FILES),
-          "so is what makes it a developer PC too (installer, service source, xgConsole.exe)")
+          "so is what makes it a developer PC too (installer, service source)")
     with open(os.path.join(package, "agent.json"), encoding="utf-8") as f:
         check(json.load(f) == {}, "a new package has its own empty settings file")
     with open(os.path.join(package, gui.MANUAL), encoding="utf-8") as f:
@@ -357,12 +357,12 @@ def main():
     check(cid not in agent.compilers, "a deleted folder stops being offered")
 
     print("The packaged agent, and adding to a helper's folder while it runs:")
-    packaged_exe = os.path.join(package, "DistriBuildAgent.exe")
+    packaged_exe = os.path.join(package, gui.PROGRAM)
     exe_cfg = os.path.join(work, "exe agent.json")
     with open(exe_cfg, "w", encoding="utf-8") as f:
         json.dump({"auto_detect": False, "port": PACKAGE_PORT, "discovery_port": PACKAGE_PORT + 1,
                    "work_dir": os.path.join(work, "exe work")}, f)
-    running = subprocess.Popen([packaged_exe, "--config", exe_cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    running = subprocess.Popen([packaged_exe, "agent", "--config", exe_cfg], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         check(pump(lambda: gui.port_in_use(PACKAGE_PORT), 60), "the packaged agent starts")
         info, error = gui.probe_agent("127.0.0.1", PACKAGE_PORT, "")
@@ -373,7 +373,7 @@ def main():
         result = gui.build_package(package, {cid: cl}, lines.append)
         check(not os.path.exists(os.path.join(package, "agent.json")),
               "a helper's folder in use gets no settings file, so one kept in the profile stays in use")
-        check(result["busy"] == ["DistriBuildAgent.exe"], "the running agent's program is left alone, not an error")
+        check(result["busy"] == [gui.PROGRAM], "the running agent's program is left alone, not an error")
         check(("이미 있음: %s" % cid) in lines, "a compiler already there is not copied again")
         check(not [n for n in os.listdir(os.path.join(package, "msvc")) if n.startswith(".")], "no staging folder is left")
         others = [(other, path) for other, path in developer.compiler_paths.items() if other != cid]

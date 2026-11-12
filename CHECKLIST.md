@@ -8,7 +8,7 @@
 
 ## ① 헬퍼 PC
 
-- [ ] 에이전트 실행: `python agent.py --config agent.json` (또는 `DistriBuildAgent.exe`)
+- [ ] 에이전트 실행: `python agent.py --config agent.json` (또는 `DistriBuild.exe agent --config agent.json`)
 - [ ] 방화벽: **TCP 31890**, **UDP 31891** 허용
 - [ ] `python agent.py --print-detected`에 필요한 항목이 보이는지 확인
 
@@ -21,7 +21,7 @@
 
 ## ② 개발자 PC: C++
 
-- [ ] `Tools\DistriBuild\build_xgconsole.bat`
+- [ ] `Tools\DistriBuild\build.bat`
 - [ ] **관리자 권한으로** `Tools\DistriBuild\install_client.bat`
 - [ ] 새 터미널에서 `xgConsole --doctor` 실행. 모든 항목이 `[ok]`인지 확인
 - [ ] 빌드 로그에 `DistriBuild: N actions, X local slots, Y remote slots`가 나오는지 확인

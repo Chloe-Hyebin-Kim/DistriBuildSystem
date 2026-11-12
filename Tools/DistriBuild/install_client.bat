@@ -1,11 +1,12 @@
 @echo off
 rem Sets up a developer PC so UnrealBuildTool (UE 4.26 and 5.8) hands C++ builds to DistriBuild.
-rem Run as administrator, after build_xgconsole.bat:
+rem Run as administrator, beside DistriBuild.exe (a package) or after build.bat (dist\DistriBuild.exe):
 rem     install_client.bat [install folder, default C:\DistriBuild\bin]
 rem
 rem   1. Installs a do-nothing service named "Incredibuild Agent": XGE.IsAvailable in UBT refuses
 rem      to use the XGE executor unless a service of that name is running.
-rem   2. Copies xgConsole.exe to the install folder and adds that folder to the machine PATH.
+rem   2. Copies DistriBuild.exe to the install folder as xgConsole.exe, the name UBT runs, and adds
+rem      that folder to the machine PATH.
 rem
 rem Undo with uninstall_client.bat.
 setlocal
@@ -20,8 +21,10 @@ if errorlevel 1 (
 	echo Run this from an administrator command prompt.
 	exit /b 1
 )
-if not exist "%HERE%dist\xgConsole.exe" (
-	echo %HERE%dist\xgConsole.exe not found. Run build_xgconsole.bat first.
+set "PROGRAM=%HERE%DistriBuild.exe"
+if not exist "%PROGRAM%" set "PROGRAM=%HERE%dist\DistriBuild.exe"
+if not exist "%PROGRAM%" (
+	echo DistriBuild.exe not found beside this file or in its dist folder. Run build.bat first.
 	exit /b 1
 )
 rem UBT prefers an xgConsole.exe named by this key, which would bypass DistriBuild.
@@ -44,7 +47,7 @@ if not errorlevel 1 (
 )
 
 if not exist "%BIN%" mkdir "%BIN%" || exit /b 1
-copy /y "%HERE%dist\xgConsole.exe" "%BIN%\" >nul || exit /b 1
+copy /y "%PROGRAM%" "%BIN%\xgConsole.exe" >nul || exit /b 1
 "%CSC%" /nologo /target:exe /reference:System.ServiceProcess.dll /out:"%BIN%\DistriBuildXgeShim.exe" "%HERE%service\DistriBuildXgeShim.cs" || exit /b 1
 
 sc create "%SERVICE%" binPath= "\"%BIN%\DistriBuildXgeShim.exe\"" start= auto obj= "NT AUTHORITY\LocalService" DisplayName= "DistriBuild XGE shim (%SERVICE%)" >nul || exit /b 1

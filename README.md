@@ -33,23 +33,22 @@ Incredibuild처럼 LAN의 여러 PC에 빌드 작업을 나눠 실행합니다. 
 
 설정 창 `Tools\DistriBuild\setup_gui.py`는 아래 "터미널로 설정하고 사용하기"의 ②~④를 대신합니다. 같은 `agent.json`과 `client.json`을 고치므로 명령줄 도구와 섞어 써도 됩니다. 셰이더 분산(⑤)은 창에서 설정하지 않습니다.
 
-### 준비: 설정 창 실행하기
+### 준비: 프로그램 빌드하기
 
-개발자 PC에서 한 번 실행합니다. Python 3.9 이상이 필요합니다.
+설정 창, 헬퍼 에이전트, UBT가 실행하는 xgConsole이 모두 실행 파일 **`DistriBuild.exe` 하나**에 들어 있습니다. 코드는 Python이라 `.sln`은 없고, 저장소가 있는 PC 한 대에서 배치 파일 하나로 빌드합니다. Python 3.9 이상이 필요합니다. `build.bat`은 처음 실행할 때 `Tools\DistriBuild\build\venv`에 PySide6와 PyInstaller를 설치하고 거기서 빌드하므로, PC의 Python 환경은 바꾸지 않습니다.
 ```bash
-pip install PySide6-Essentials pyinstaller
+Tools\DistriBuild\build.bat
 ```
-```bash
-python Tools\DistriBuild\setup_gui.py
-```
-헬퍼 PC에는 Python이 없어도 됩니다. 개발자 PC에서 실행 파일을 만들어 패키지로 보냅니다.
-```bash
-Tools\DistriBuild\build_xgconsole.bat
-```
-```bash
-Tools\DistriBuild\build_setup_gui.bat
-```
-`Tools\DistriBuild\dist\`에 `xgConsole.exe`, `DistriBuildAgent.exe`, `DistriBuildSetup.exe`가 생깁니다. 개발자 탭의 **xgConsole 빌드** 버튼은 앞의 두 개만 만듭니다.
+`Tools\DistriBuild\dist\DistriBuild.exe`가 생깁니다. 더블클릭하면 설정 창이 열립니다(콘솔 창이 잠깐 보였다가 사라집니다). 다른 PC에는 Python이 없어도 됩니다. 이 exe를 패키지로 만들어 보냅니다(→ 2단계).
+
+| 실행 방법 | 하는 일 |
+|---|---|
+| `DistriBuild.exe` | 설정 창 |
+| `DistriBuild.exe agent [옵션]` | 헬퍼 에이전트. 옵션은 `agent.py`와 같습니다 |
+| `DistriBuild.exe xgconsole [인자]` | 빌드 분산 도구. 인자는 `xgconsole.py`와 같습니다(예: `--doctor`) |
+| `xgConsole.exe [인자]` | 설치할 때 `C:\DistriBuild\bin`에 이 이름으로 복사한 같은 파일. UBT가 이 이름으로 실행합니다 |
+
+Python으로 바로 실행하려면 `python Tools\DistriBuild\setup_gui.py`(PySide6 필요)를 씁니다.
 
 창은 **개발자 겸 헬퍼**, **헬퍼 PC**, **개발자 PC** 탭으로 나뉩니다. 아래쪽 칸에는 버튼을 누를 때마다 진행 상황이 나옵니다. `[ok]`는 초록색, `[!!]`는 빨간색입니다. 관리자라고 적힌 버튼은 누를 때 UAC 창이 뜹니다.
 
@@ -59,8 +58,8 @@ Tools\DistriBuild\build_setup_gui.bat
 
 ![개발자 겸 헬퍼 탭](docs/images/setup-both.png)
 
-1. 한 PC에서 위의 준비를 마치고, 개발자 PC 탭의 **헬퍼 PC용 패키지**로 패키지를 만듭니다(→ 2단계). 패키지에는 헬퍼 프로그램과 함께 개발자 설치에 필요한 `install_client.bat`, `xgConsole.exe`도 들어갑니다.
-2. 모든 PC(패키지를 만든 PC 포함)에서 패키지 폴더 내용을 로컬 디스크(예: `C:\DistriBuild`)에 복사하고 `DistriBuildSetup.exe`를 실행합니다.
+1. 한 PC에서 위의 준비를 마치고, 개발자 PC 탭의 **헬퍼 PC용 패키지**로 패키지를 만듭니다(→ 2단계). 패키지에는 `DistriBuild.exe`와 함께 개발자 설치에 필요한 `install_client.bat`도 들어갑니다.
+2. 모든 PC(패키지를 만든 PC 포함)에서 패키지 폴더 내용을 로컬 디스크(예: `C:\DistriBuild`)에 복사하고 `DistriBuild.exe`를 실행합니다.
 3. **개발자 겸 헬퍼** 탭에서 팀이 함께 쓸 **토큰**을 넣고 **모두 설정 (관리자)**를 누릅니다. UAC 한 번으로 다음을 합니다.
    - 토큰을 헬퍼 설정(`agent.json`)과 개발자 설정(`client.json`)에 저장
    - xgConsole 설치 (1단계의 설치와 같음)
@@ -81,7 +80,7 @@ Tools\DistriBuild\build_setup_gui.bat
 
 ![개발자 PC 탭](docs/images/setup-developer.png)
 
-1. **UnrealBuildTool 연결**에서 **설치 / 업데이트 (관리자)**를 누릅니다. 네 줄이 모두 초록색이 되면 UBT가 빌드를 DistriBuild로 보냅니다. `xgConsole.exe가 없음`이 나오면 먼저 **xgConsole 빌드**를 누르세요.
+1. **UnrealBuildTool 연결**에서 **설치 / 업데이트 (관리자)**를 누릅니다. 네 줄이 모두 초록색이 되면 UBT가 빌드를 DistriBuild로 보냅니다. `DistriBuild.exe가 없음`이 나오면 먼저 **프로그램 빌드**를 누르거나 `build.bat`을 실행하세요.
 2. **빌드 설정**의 **토큰**에 팀이 함께 쓸 문자열을 넣습니다. 헬퍼 PC에도 같은 토큰을 넣습니다. 비워 두면 인증하지 않습니다.
 3. 오른쪽 아래 **저장**을 누릅니다. `%USERPROFILE%\.distribuild\client.json`에 저장됩니다.
 4. Visual Studio를 다시 시작합니다. PATH 변경은 새로 연 프로그램부터 적용됩니다.
@@ -107,13 +106,13 @@ Tools\DistriBuild\build_setup_gui.bat
 
 1. **헬퍼 PC용 패키지**의 **넣을 컴파일러**에서 보낼 컴파일러를 고릅니다. 어느 것을 UBT가 쓰는지 모르면 모두 두세요(하나에 약 100MB).
 2. **찾아보기**로 USB나 공유 폴더를 고르고 **패키지 만들기**를 누릅니다.
-3. 그 폴더에 `DistriBuildSetup.exe`, `DistriBuildAgent.exe`, 빈 설정 파일 `agent.json`, `msvc\<컴파일러 ID>\`가 생깁니다. 그 PC를 개발자 PC로도 쓸 수 있도록 `install_client.bat`, `uninstall_client.bat`, `service\`, `dist\xgConsole.exe`도 들어갑니다. 받는 사람이 읽을 [사용설명서](docs/사용설명서.md)도 `사용설명서.txt`로 들어갑니다.
+3. 그 폴더에 `DistriBuild.exe`, 빈 설정 파일 `agent.json`, `msvc\<컴파일러 ID>\`가 생깁니다. 그 PC를 개발자 PC로도 쓸 수 있도록 `install_client.bat`, `uninstall_client.bat`, `service\`도 들어갑니다. 받는 사람이 읽을 [사용설명서](docs/사용설명서.md)도 `사용설명서.txt`로 들어갑니다.
 
 ### 3단계: 헬퍼 PC 설정하기 (헬퍼 PC 탭)
 
 ![헬퍼 PC 탭](docs/images/setup-helper.png)
 
-1. 패키지 폴더의 내용을 헬퍼 PC의 로컬 디스크에 통째로 복사하고 `DistriBuildSetup.exe`를 실행합니다. 헬퍼 PC 탭이 열립니다. 이 문서는 `C:\DistriBuild`를 예로 들지만 어느 폴더든 됩니다. 자동 시작은 SYSTEM 계정으로 돌아 네트워크 드라이브를 보지 못하므로 로컬 디스크에 두세요.
+1. 패키지 폴더의 내용을 헬퍼 PC의 로컬 디스크에 통째로 복사하고 `DistriBuild.exe`를 실행합니다. 헬퍼 PC 탭이 열립니다. 이 문서는 `C:\DistriBuild`를 예로 들지만 어느 폴더든 됩니다. 자동 시작은 SYSTEM 계정으로 돌아 네트워크 드라이브를 보지 못하므로 로컬 디스크에 두세요.
 2. **에이전트 설정**의 **토큰**에 1단계와 같은 토큰을 넣고 **저장**합니다. 프로그램 옆의 `agent.json`(예: `C:\DistriBuild\agent.json`)에 저장되고, 자동 시작 로그도 그 옆에 남습니다. 옆에 `agent.json`이 없으면 `%USERPROFILE%\.distribuild\agent.json`을 씁니다. 나머지 항목은 기본값으로 충분합니다.
    - **PC 이름**: 개발자 탭에 보일 이름. 비우면 Windows PC 이름
    - **동시 작업 수**: 받을 작업 수. 헬퍼 PC를 사람도 쓰면 CPU 수보다 낮춥니다
@@ -190,13 +189,13 @@ Visual Studio나 `Build.bat`으로 평소처럼 빌드합니다. 출력에 `Dist
 
 | PC | 경로 | 내용 | 만드는 단계 |
 |---|---|---|---|
-| 개발자 | `<저장소>\Tools\DistriBuild\dist\` | `xgConsole.exe`, `DistriBuildAgent.exe` | ① |
-| 개발자 | `C:\DistriBuild\bin\` | UBT가 실행하는 `xgConsole.exe`, `Incredibuild Agent` 서비스용 `DistriBuildXgeShim.exe` | ④-1 |
+| 개발자 | `<저장소>\Tools\DistriBuild\dist\` | `DistriBuild.exe` | ① |
+| 개발자 | `C:\DistriBuild\bin\` | UBT가 실행하는 `xgConsole.exe`(`DistriBuild.exe`를 이 이름으로 복사한 것), `Incredibuild Agent` 서비스용 `DistriBuildXgeShim.exe` | ④-1 |
 | 개발자 | `%USERPROFILE%\.distribuild\client.json` | C++ 작업을 보낼 헬퍼 PC 목록 | ④-2 |
 | 개발자 | `%USERPROFILE%\.distribuild\last_build.csv` | 마지막 빌드의 작업별 보고서 (자동 생성) | ④-4 |
 | 개발자 | `<프로젝트>\Plugins\DistriBuild\` | 셰이더 플러그인 | ⑤-1 |
 | 개발자 | `<프로젝트>\Config\DefaultEngine.ini` | 셰이더 작업을 보낼 헬퍼 PC 목록 | ⑤-3 |
-| 헬퍼 | `C:\DistriBuild\DistriBuildAgent.exe` | 에이전트 | ③-1 |
+| 헬퍼 | `C:\DistriBuild\DistriBuild.exe` | 에이전트 (`agent`를 붙여 실행) | ③-1 |
 | 헬퍼 | `C:\DistriBuild\agent.json` | 에이전트 설정 | ③-2 |
 | 헬퍼 | `C:\DistriBuild\msvc\<컴파일러 ID>\` | 개발자 PC에서 복사한 MSVC (필요할 때만) | ③-1 |
 
@@ -210,13 +209,10 @@ Python 3.9 이상이 필요합니다. 한 번만 하면 되고, 저장소를 업
 cd <저장소>
 ```
 ```bash
-pip install pyinstaller
-```
-```bash
-Tools\DistriBuild\build_xgconsole.bat
+Tools\DistriBuild\build.bat
 ```
 
-`<저장소>\Tools\DistriBuild\dist\`에 `xgConsole.exe`와 `DistriBuildAgent.exe`가 생깁니다. 다시 빌드했다면 ④-1의 `install_client.bat`도 다시 실행해야 `C:\DistriBuild\bin`의 파일이 바뀝니다.
+`<저장소>\Tools\DistriBuild\dist\`에 `DistriBuild.exe`가 생깁니다. 이 파일 하나가 헬퍼 에이전트(`DistriBuild.exe agent`)이자, 설치할 때 `xgConsole.exe`로 복사되는 빌드 분산 도구입니다. 다시 빌드했다면 ④-1의 `install_client.bat`도 다시 실행해야 `C:\DistriBuild\bin`의 파일이 바뀝니다.
 
 ### ② 개발자 PC: 헬퍼 PC로 옮길 파일 준비
 
@@ -224,7 +220,7 @@ Tools\DistriBuild\build_xgconsole.bat
 
 **②-1. 이 PC의 컴파일러를 확인합니다.**
 ```bash
-Tools\DistriBuild\dist\DistriBuildAgent.exe --print-detected
+Tools\DistriBuild\dist\DistriBuild.exe agent --print-detected
 ```
 ```
   compiler msvc-19.44.35229-x64
@@ -236,7 +232,7 @@ UBT가 실제로 고르는 컴파일러는 `%LOCALAPPDATA%\UnrealBuildTool\Log.t
 
 **②-2. USB로 복사합니다.** 컴파일러 폴더 이름은 컴파일러 ID로 합니다.
 ```bash
-robocopy "<저장소>\Tools\DistriBuild\dist" "E:\DistriBuild" DistriBuildAgent.exe
+robocopy "<저장소>\Tools\DistriBuild\dist" "E:\DistriBuild" DistriBuild.exe
 ```
 ```bash
 robocopy "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64" "E:\DistriBuild\msvc\msvc-19.44.35229-x64" /E
@@ -256,7 +252,7 @@ robocopy "E:\DistriBuild" "C:\DistriBuild" /E
 ```powershell
 Set-Content -Encoding utf8 C:\DistriBuild\agent.json '{}'
 ```
-`DistriBuildAgent.exe` 옆 `msvc\<컴파일러 ID>\cl.exe`의 컴파일러, 이 PC에 설치된 엔진과 Visual Studio는 이 파일과 관계없이 자동으로 찾습니다. 실행 중에 `msvc` 아래에 폴더를 더 복사해도 1분 안에 씁니다. 다른 위치의 컴파일러만 `"compilers": ["D:/경로/cl.exe"]`로 적습니다. 나머지 키(`slots`, `token`, `work_dir`, `pch_cache_gb` 등)는 `agent.example.json`을 참고하세요.
+`DistriBuild.exe` 옆 `msvc\<컴파일러 ID>\cl.exe`의 컴파일러, 이 PC에 설치된 엔진과 Visual Studio는 이 파일과 관계없이 자동으로 찾습니다. 실행 중에 `msvc` 아래에 폴더를 더 복사해도 1분 안에 씁니다. 다른 위치의 컴파일러만 `"compilers": ["D:/경로/cl.exe"]`로 적습니다. 나머지 키(`slots`, `token`, `work_dir`, `pch_cache_gb` 등)는 `agent.example.json`을 참고하세요.
 
 **③-3. 방화벽을 엽니다.** 관리자 권한 터미널에서 실행합니다. 규칙 이름은 설정 GUI가 쓰는 것과 같습니다.
 ```bash
@@ -272,7 +268,7 @@ netsh advfirewall firewall add rule name="DistriBuild Agent UDP" dir=in action=a
 cd C:\DistriBuild
 ```
 ```bash
-.\DistriBuildAgent.exe --config agent.json --print-detected
+.\DistriBuild.exe agent --config agent.json --print-detected
 ```
 ```
 DistriBuild agent 'BUILD-PC-07'  port=31890  slots=12
@@ -284,13 +280,13 @@ DistriBuild agent 'BUILD-PC-07'  port=31890  slots=12
 
 **③-5. 에이전트를 실행합니다.**
 ```bash
-.\DistriBuildAgent.exe --config agent.json
+.\DistriBuild.exe agent --config agent.json
 ```
 이 창이 열려 있는 동안만 작업을 받습니다. `Ctrl+C`로 끕니다. 같은 포트에 이미 에이전트가 떠 있으면 바로 종료됩니다(종료 코드 2).
 
 **③-6. (선택) PC를 켜면 자동으로 시작합니다.** 관리자 권한 PowerShell에서 한 번 실행합니다. 로그인하지 않아도 SYSTEM 계정으로 실행되고, 시간 제한 없이 낮은 우선순위로 돌며 로그를 `C:\DistriBuild\agent-autostart.log`에 남깁니다.
 ```powershell
-$a = New-ScheduledTaskAction -Execute "C:\DistriBuild\DistriBuildAgent.exe" -Argument '--config "C:\DistriBuild\agent.json" --log "C:\DistriBuild\agent-autostart.log"' -WorkingDirectory "C:\DistriBuild"
+$a = New-ScheduledTaskAction -Execute "C:\DistriBuild\DistriBuild.exe" -Argument 'agent --config "C:\DistriBuild\agent.json" --log "C:\DistriBuild\agent-autostart.log"' -WorkingDirectory "C:\DistriBuild"
 $t = New-ScheduledTaskTrigger -AtStartup
 $s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -Priority 7
 $p = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
@@ -315,7 +311,7 @@ SYSTEM 계정은 사용자 환경 변수(`UE_ROOT`, 사용자 PATH)를 보지 �
 ```bash
 <저장소>\Tools\DistriBuild\install_client.bat
 ```
-- `C:\DistriBuild\bin`에 `xgConsole.exe`를 복사하고 시스템 PATH에 추가합니다.
+- `C:\DistriBuild\bin`에 `DistriBuild.exe`를 `xgConsole.exe`라는 이름으로 복사하고 시스템 PATH에 추가합니다.
 - 아무 일도 하지 않는 `Incredibuild Agent` 서비스를 등록합니다. UBT는 이 이름의 서비스가 실행 중일 때만 XGE 실행기를 쓰고, 그 실행기가 PATH의 `xgConsole.exe`를 부릅니다.
 - 실제 Incredibuild가 설치되어 있으면 아무것도 바꾸지 않고 중단합니다.
 - 엔진 파일과 `BuildConfiguration.xml`은 바꾸지 않습니다.
@@ -503,4 +499,5 @@ findstr /I "DistriBuild" "<프로젝트>\Saved\Logs\<이름>.log"
 - **전처리는 항상 개발자 PC에서 돕니다.** UE 소스 파일 하나에 2~4초가 걸립니다. PC 수를 아주 많이 늘리면 여기서 막히므로 필요하면 `max_preprocess`를 올리세요. Incredibuild는 파일 시스템을 가상화해서 이 단계가 없습니다.
 - **첫 빌드의 PCH 전송 비용.** UE 5.8 UnrealEd PCH는 2.4GB입니다. 에이전트마다 PCH 하나당 한 번씩 보냅니다.
 - 링크, UHT, 쿠킹 자체, 라이트 빌드, 커스텀 빌드 단계는 분산되지 않습니다.
+- `DistriBuild.exe`는 설정 창의 Qt까지 담은 한 파일(약 40MB)이라, 실행할 때마다 압축을 푸는 데 시간이 듭니다. UBT가 빌드마다 `xgConsole.exe`를 한 번 띄울 때, 따로 만든 작은 exe보다 1초쯤 늦게 시작합니다.
 - UE 4.26 C++는 해당 PC의 UBT가 고른 컴파일러 그대로 동작합니다. UBT가 더 새 MSVC를 고르면 에이전트에도 그 버전이 있어야 합니다.

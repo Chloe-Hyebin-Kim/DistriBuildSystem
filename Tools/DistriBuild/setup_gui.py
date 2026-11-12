@@ -4,7 +4,8 @@
     pip install PySide6-Essentials
     python setup_gui.py
 
-build_setup_gui.bat turns this into dist\\DistriBuildSetup.exe, which needs no Python.
+build.bat turns it, with the agent and xgConsole, into dist\\DistriBuild.exe, which needs no Python
+(see distribuild.py).
 
 It edits the same files the command line tools read (agent.json, ~/.distribuild/client.json) and
 runs the existing install_client.bat, so everything stays usable without the GUI.
@@ -62,10 +63,12 @@ SHIM = "DistriBuildXgeShim"
 FIREWALL_TCP = "DistriBuild Agent TCP"
 FIREWALL_UDP = "DistriBuild Agent UDP"
 AUTOSTART_TASK = "DistriBuild Agent"
-PACKAGE_EXES = ("DistriBuildSetup.exe", "DistriBuildAgent.exe")
+# The one program: this window, the agent ("DistriBuild.exe agent") and, copied as xgConsole.exe, the
+# build front end. See distribuild.py.
+PROGRAM = "DistriBuild.exe"
+PACKAGE_EXES = (PROGRAM,)
 # What install_client.bat needs, so a PC set up from a package can be a developer PC too.
-PACKAGE_DEVELOPER_FILES = ("install_client.bat", "uninstall_client.bat", os.path.join("service", "DistriBuildXgeShim.cs"),
-                           os.path.join("dist", "xgConsole.exe"))
+PACKAGE_DEVELOPER_FILES = ("install_client.bat", "uninstall_client.bat", os.path.join("service", "DistriBuildXgeShim.cs"))
 # The manual for whoever gets the package, as .txt so it opens with a double click. A package carries it on.
 MANUAL = "사용설명서.txt"
 # A cross compiler also needs the host toolset's DLLs, so only x64-hosted x64 copies work on their own.
@@ -74,6 +77,15 @@ GOOD, BAD, NEUTRAL = "#2e7d32", "#c62828", "#808080"
 
 
 # --------------------------------------------------------------------------- paths and files
+
+def program_path():
+    """DistriBuild.exe: beside this window (a package, or the exe itself), else built in the tools' dist."""
+    tools = find_tools_dir()
+    for folder in [APP_DIR] + ([os.path.join(tools, "dist")] if tools else []):
+        if os.path.isfile(os.path.join(folder, PROGRAM)):
+            return os.path.join(folder, PROGRAM)
+    return None
+
 
 def find_tools_dir():
     """The folder holding install_client.bat. A built exe sits in its dist subfolder."""
@@ -239,7 +251,7 @@ def autostart_task_xml(command, working_dir):
     return """<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>DistriBuild helper agent. Created by DistriBuildSetup.</Description>
+    <Description>DistriBuild helper agent. Created by DistriBuild.</Description>
     <SecurityDescriptor>D:AI(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;AU)</SecurityDescriptor>
   </RegistrationInfo>
   <Triggers>
@@ -329,8 +341,8 @@ def agent_command(config_path):
     """How to start the agent, or None. From source this runs agent.py, so it can never be a stale exe."""
     if not FROZEN:
         return [sys.executable, "-u", os.path.join(APP_DIR, "agent.py"), "--config", config_path]
-    exe = os.path.join(APP_DIR, "DistriBuildAgent.exe")
-    return [exe, "--config", config_path] if os.path.isfile(exe) else None
+    exe = os.path.join(APP_DIR, PROGRAM)
+    return [exe, "agent", "--config", config_path] if os.path.isfile(exe) else None
 
 
 def probe_agent(host, port, token, timeout=3.0):
@@ -389,7 +401,7 @@ def developer_status(bin_dir):
               "xgconsole_built": False, "installed": os.path.isfile(os.path.join(bin_dir, "xgConsole.exe"))}
     tools = find_tools_dir()
     if tools:
-        status["xgconsole_built"] = os.path.isfile(os.path.join(tools, "dist", "xgConsole.exe"))
+        status["xgconsole_built"] = program_path() is not None
     status["on_path"] = os.path.normcase(bin_dir) in [os.path.normcase(p.rstrip("\\/")) for p in fresh_path().split(";")]
     if IS_WINDOWS:
         import winreg
@@ -446,7 +458,7 @@ TOKEN_REASONS = {
     "token_on_command_line": "--token으로 실행 중 (그 PC에서 직접 변경)",
     "no_config": "설정 파일 없이 실행 중 (그 PC에서 직접 변경)",
     "bad_token": "쓸 수 없는 토큰 (공백 없이 256자 이하)",
-    "expected reserve": "헬퍼 프로그램이 이전 버전 (새 DistriBuildAgent.exe 필요)",
+    "expected reserve": "헬퍼 프로그램이 이전 버전 (새 DistriBuild.exe 필요)",
 }
 
 
@@ -493,7 +505,8 @@ def build_package(dest, compilers, report):
     # A new package gets its own settings file, so the helper keeps its settings and log beside the programs.
     # A helper's folder already in use is left as it is: it may keep its settings in the user's profile.
     config = os.path.join(dest, "agent.json")
-    if not os.path.isfile(os.path.join(dest, "DistriBuildAgent.exe")) and not os.path.isfile(config):
+    in_use = any(os.path.isfile(os.path.join(dest, name)) for name in (PROGRAM, "DistriBuildAgent.exe"))
+    if not in_use and not os.path.isfile(config):
         with open(config, "w", encoding="utf-8") as f:
             f.write("{}\n")
         report("빈 설정 파일을 만들었습니다: agent.json")
@@ -960,7 +973,7 @@ class HelperPage(Page):
             self.autostart_on_button.setText("이 위치로 다시 등록 (관리자)")
         if command is None:
             self.autostart_on_button.setEnabled(False)
-            self.autostart_on_button.setToolTip("DistriBuildAgent.exe를 이 프로그램과 같은 폴더에 두어야 합니다.")
+            self.autostart_on_button.setToolTip("이 프로그램의 파일 이름이 DistriBuild.exe여야 합니다.")
         self.autostart_off_button.setEnabled(task is not None)
 
     def autostart_markers(self):
@@ -973,7 +986,7 @@ class HelperPage(Page):
         """Saves the settings and writes the task file. Returns (UAC command, task file), or None after logging why not."""
         command = autostart_command(self.config_path)
         if command is None:
-            self.log("[!!] DistriBuildAgent.exe를 이 프로그램과 같은 폴더에 두어야 합니다.")
+            self.log("[!!] 이 프로그램의 파일 이름이 DistriBuild.exe여야 에이전트를 실행할 수 있습니다.")
             return None
         if not self.autostart and not self.is_running() and port_in_use(self.port.value()):
             self.log("[!!] 포트 %d을 다른 프로그램이 쓰고 있습니다. 그 프로그램을 끄거나 포트를 바꾼 뒤 다시 누르세요."
@@ -1016,7 +1029,7 @@ class HelperPage(Page):
             return
         command = agent_command(self.config_path)
         if command is None:
-            self.log("[!!] DistriBuildAgent.exe를 이 프로그램과 같은 폴더에 두어야 합니다.")
+            self.log("[!!] 이 프로그램의 파일 이름이 DistriBuild.exe여야 에이전트를 실행할 수 있습니다.")
             return
         self.save()
         self.process = LoggedProcess(self, self.log)
@@ -1114,10 +1127,10 @@ class DeveloperPage(Page):
         form = QFormLayout()
         form.addRow("설치 폴더", self.bin_dir)
         state_layout.addLayout(form)
-        self.build_button = QPushButton("xgConsole 빌드")
+        self.build_button = QPushButton("프로그램 빌드")
         self.install_button = QPushButton("설치 / 업데이트 (관리자)")
         self.uninstall_button = QPushButton("제거 (관리자)")
-        self.build_button.clicked.connect(self.build_xgconsole)
+        self.build_button.clicked.connect(self.build_program)
         self.install_button.clicked.connect(self.install)
         self.uninstall_button.clicked.connect(self.uninstall)
         state_layout.addLayout(button_row(self.build_button, self.install_button, self.uninstall_button))
@@ -1201,7 +1214,7 @@ class DeveloperPage(Page):
         package_layout.addWidget(self.package_list)
         package_layout.addLayout(browse_row(self.package_dest, browse))
         package_layout.addLayout(button_row(self.package_button))
-        hint = QLabel("새 헬퍼: 만든 폴더의 내용을 헬퍼 PC의 C:\\DistriBuild에 복사하고 DistriBuildSetup.exe를 실행하세요.\n"
+        hint = QLabel("새 헬퍼: 만든 폴더의 내용을 헬퍼 PC의 C:\\DistriBuild에 복사하고 DistriBuild.exe를 실행하세요.\n"
                       "이미 쓰는 헬퍼에 컴파일러 추가: 그 헬퍼의 패키지 폴더(예: \\\\헬퍼PC\\c$\\DistriBuild)를 바로 고르세요. "
                       "실행 중인 에이전트가 1분 안에 새 컴파일러를 찾아 씁니다.")
         hint.setWordWrap(True)
@@ -1304,7 +1317,7 @@ class DeveloperPage(Page):
     def show_status(self, s):
         self.status = s
         built = s["xgconsole_built"]
-        self.state_labels["built"].setText(status_html(built, "xgConsole.exe 빌드됨" if built else "xgConsole.exe가 없음 (빌드 필요)"))
+        self.state_labels["built"].setText(status_html(built, "DistriBuild.exe 있음" if built else "DistriBuild.exe가 없음 (빌드 필요)"))
         real = s["real_incredibuild"]
         self.state_labels["incredibuild"].setText(
             status_html(not real, "실제 Incredibuild 없음" if not real else "실제 Incredibuild가 설치됨: %s (제거 필요)" % real))
@@ -1314,16 +1327,21 @@ class DeveloperPage(Page):
         self.state_labels["service"].setText(status_html(*service))
         placed = s["installed"] and s["on_path"]
         self.state_labels["path"].setText(status_html(placed, "xgConsole이 설치되어 PATH에 있음" if placed else "xgConsole이 설치 폴더나 PATH에 없음"))
-        # A helper package carries xgConsole.exe ready-made but not the sources to build it.
-        self.build_button.setEnabled(bool(self.tools) and os.path.isfile(os.path.join(self.tools, "build_xgconsole.bat")))
+        # A package carries DistriBuild.exe ready-made but not the sources to build it, and the exe this
+        # window runs from cannot be built over.
+        rebuilding_self = FROZEN and self.tools and os.path.normcase(APP_DIR) == os.path.normcase(os.path.join(self.tools, "dist"))
+        self.build_button.setEnabled(bool(self.tools) and os.path.isfile(os.path.join(self.tools, "build.bat"))
+                                     and not rebuilding_self)
+        if rebuilding_self:
+            self.build_button.setToolTip("실행 중인 DistriBuild.exe는 다시 빌드할 수 없습니다. 창을 닫고 build.bat을 실행하세요.")
         self.install_button.setEnabled(bool(self.tools) and built and not real and s["service"] != "foreign")
         self.uninstall_button.setEnabled(bool(self.tools) and s["service"] != "foreign")
         if not self.tools:
             self.install_button.setToolTip("install_client.bat이 있는 폴더에서 실행해야 합니다.")
         self.window_.state_changed()
 
-    def build_xgconsole(self):
-        self.window_.run_process("cmd.exe", ["/c", os.path.join(self.tools, "build_xgconsole.bat")], self.build_button,
+    def build_program(self):
+        self.window_.run_process("cmd.exe", ["/c", os.path.join(self.tools, "build.bat")], self.build_button,
                                  cwd=self.tools, done=lambda _code: self.refresh_status())
 
     def install_command(self):
@@ -1331,8 +1349,8 @@ class DeveloperPage(Page):
         if not self.tools:
             self.log("[!!] install_client.bat이 있는 폴더에서 실행해야 합니다.")
             return None
-        if not os.path.isfile(os.path.join(self.tools, "dist", "xgConsole.exe")):
-            self.log("[!!] xgConsole.exe가 없습니다. 먼저 xgConsole을 빌드하세요.")
+        if not program_path():
+            self.log("[!!] DistriBuild.exe가 없습니다. 먼저 프로그램을 빌드하세요.")
             return None
         return 'call "%s" "%s"' % (os.path.join(self.tools, "install_client.bat"), self.install_folder())
 
@@ -1474,7 +1492,7 @@ class DeveloperPage(Page):
 
         def finished(result):
             if result["missing"]:
-                self.log("[!!] 포함하지 못한 프로그램: %s (build_xgconsole.bat, build_setup_gui.bat으로 먼저 빌드하세요)"
+                self.log("[!!] 포함하지 못한 프로그램: %s (build.bat으로 먼저 빌드하세요)"
                          % ", ".join(result["missing"]))
             if result["busy"]:
                 self.log("[!!] 실행 중이라 바꾸지 못한 프로그램: %s (헬퍼에서 에이전트를 멈춘 뒤 다시 만들면 바뀝니다)"
