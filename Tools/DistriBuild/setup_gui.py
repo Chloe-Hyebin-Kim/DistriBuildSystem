@@ -484,6 +484,13 @@ def build_package(dest, compilers, report):
     tools = find_tools_dir()
     folders = [APP_DIR] + ([os.path.join(tools, "dist")] if tools else [])
     result = {"missing": [], "busy": []}
+    # A new package gets its own settings file, so the helper keeps its settings and log beside the programs.
+    # A helper's folder already in use is left as it is: it may keep its settings in the user's profile.
+    config = os.path.join(dest, "agent.json")
+    if not os.path.isfile(os.path.join(dest, "DistriBuildAgent.exe")) and not os.path.isfile(config):
+        with open(config, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+        report("빈 설정 파일을 만들었습니다: agent.json")
     for name in PACKAGE_EXES:
         source = next((os.path.join(f, name) for f in folders if os.path.isfile(os.path.join(f, name))), None)
         if source is None:

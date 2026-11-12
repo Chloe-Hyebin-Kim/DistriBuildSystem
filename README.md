@@ -80,14 +80,14 @@ Tools\DistriBuild\build_setup_gui.bat
 
 1. **헬퍼 PC용 패키지**의 **넣을 컴파일러**에서 보낼 컴파일러를 고릅니다. 어느 것을 UBT가 쓰는지 모르면 모두 두세요(하나에 약 100MB).
 2. **찾아보기**로 USB나 공유 폴더를 고르고 **패키지 만들기**를 누릅니다.
-3. 그 폴더에 `DistriBuildSetup.exe`, `DistriBuildAgent.exe`, `msvc\<컴파일러 ID>\`가 생깁니다.
+3. 그 폴더에 `DistriBuildSetup.exe`, `DistriBuildAgent.exe`, 빈 설정 파일 `agent.json`, `msvc\<컴파일러 ID>\`가 생깁니다.
 
 ### 3단계: 헬퍼 PC 설정하기 (헬퍼 PC 탭)
 
 ![헬퍼 PC 탭](docs/images/setup-helper.png)
 
-1. 패키지 폴더의 내용을 헬퍼 PC의 `C:\DistriBuild`에 복사하고 `DistriBuildSetup.exe`를 실행합니다. 헬퍼 PC 탭이 열립니다.
-2. **에이전트 설정**의 **토큰**에 1단계와 같은 토큰을 넣고 **저장**합니다. `C:\DistriBuild\agent.json`에 저장됩니다. 나머지 항목은 기본값으로 충분합니다.
+1. 패키지 폴더의 내용을 헬퍼 PC의 로컬 디스크에 통째로 복사하고 `DistriBuildSetup.exe`를 실행합니다. 헬퍼 PC 탭이 열립니다. 이 문서는 `C:\DistriBuild`를 예로 들지만 어느 폴더든 됩니다. 자동 시작은 SYSTEM 계정으로 돌아 네트워크 드라이브를 보지 못하므로 로컬 디스크에 두세요.
+2. **에이전트 설정**의 **토큰**에 1단계와 같은 토큰을 넣고 **저장**합니다. 프로그램 옆의 `agent.json`(예: `C:\DistriBuild\agent.json`)에 저장되고, 자동 시작 로그도 그 옆에 남습니다. 옆에 `agent.json`이 없으면 `%USERPROFILE%\.distribuild\agent.json`을 씁니다. 나머지 항목은 기본값으로 충분합니다.
    - **PC 이름**: 개발자 탭에 보일 이름. 비우면 Windows PC 이름
    - **동시 작업 수**: 받을 작업 수. 헬퍼 PC를 사람도 쓰면 CPU 수보다 낮춥니다
    - **작업 폴더**, **PCH 캐시 크기**: 작업 파일과 PCH 캐시를 둘 곳(비우면 시스템 임시 폴더), PCH 캐시의 최대 크기

@@ -253,8 +253,11 @@ def main():
     copied = os.path.join(package, "msvc", cid, "cl.exe")
     check(os.path.isfile(copied) and compiler_id(copied) == cid, "the packaged compiler keeps its id")
     check(os.path.isfile(os.path.join(package, "DistriBuildAgent.exe")), "the agent program is included")
+    with open(os.path.join(package, "agent.json"), encoding="utf-8") as f:
+        check(json.load(f) == {}, "a new package has its own empty settings file")
     original_app_dir = gui.APP_DIR
     gui.APP_DIR = package
+    check(gui.helper_config_path() == os.path.join(package, "agent.json"), "so the helper window run from it keeps its settings there")
     helper.compilers = [copied]
     helper.pick_up_packaged_compilers()
     check(helper.compilers == [], "a package compiler an older version saved is dropped from the settings")
@@ -328,7 +331,10 @@ def main():
         check(bool(info) and cid in info["compilers"], "it offers the package's compiler with nothing in its settings (%s)"
               % (error or "reply received"))
         lines = []
+        os.remove(os.path.join(package, "agent.json"))  # like a helper set up before packages had one
         result = gui.build_package(package, {cid: cl}, lines.append)
+        check(not os.path.exists(os.path.join(package, "agent.json")),
+              "a helper's folder in use gets no settings file, so one kept in the profile stays in use")
         check(result["busy"] == ["DistriBuildAgent.exe"], "the running agent's program is left alone, not an error")
         check(("이미 있음: %s" % cid) in lines, "a compiler already there is not copied again")
         check(not [n for n in os.listdir(os.path.join(package, "msvc")) if n.startswith(".")], "no staging folder is left")
