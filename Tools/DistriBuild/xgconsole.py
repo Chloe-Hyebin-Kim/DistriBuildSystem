@@ -38,6 +38,9 @@ distribuild_client.json next to the executable.
 `xgConsole --analyze <TaskFile.xml>` lists what can and cannot be distributed without building.
 UBT's task file from the last build is kept as ~/.distribuild/last_tasks.xml for that purpose.
 $DISTRIBUILD_AGENTS ("host:port,host") overrides "agents"; $DISTRIBUILD_DISABLE=1 forces local only.
+
+A PC can be a developer PC and a helper at once: its own agent is never used for its own builds, and
+is told to take no work from other PCs until the build ends.
 """
 
 import ctypes
@@ -56,8 +59,9 @@ import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 
-from common import (DISCOVERY_PORT, IS_WINDOWS, base_name, compiler_family, compiler_id, decode_output,
-                    discover_agents, expand_response_files, msvc_include_prefix, parse_agent_address, recv_frame,
+from common import (DEFAULT_PORT, DISCOVERY_PORT, HOLD_RENEW_SECONDS, HOLD_SECONDS, IS_WINDOWS, base_name, compiler_family, compiler_id, decode_output,
+                    discover_agents, expand_response_files, machine_id, msvc_include_prefix, parse_agent_address,
+                    recv_frame,
                     record_agent_contacts, send_file_stream, send_frame, split_cmdline)
 
 CPP_EXT = (".cpp", ".cc", ".cxx", ".c++", ".cp")
@@ -106,11 +110,16 @@ class RemoteAgent:
         self.failed = 0
 
 
+# How long to leave a helper alone after it said its own PC is building.
+OWNER_BUILDING_BACKOFF = 10.0
+
+
 class AgentPool:
     def __init__(self, cfg):
         self.cfg = cfg
         self.lock = threading.Lock()
         self.agents = {}
+        self.own = {}  # (name, port) -> host: this PC's own agents, which its builds leave alone
         # Pinned agents are asked all at once, while discovery listens, so a dead address costs
         # one connect_timeout per build instead of one each.
         self.answered = {}
@@ -120,6 +129,8 @@ class AgentPool:
             if addr:
                 self.answered[text] = False
                 threads.append(threading.Thread(target=self._query, args=addr + (text,), daemon=True))
+        # This PC's agent, even with discovery off, so a build can hold it. It is skipped once it answers.
+        threads.append(threading.Thread(target=self._query, args=("127.0.0.1", DEFAULT_PORT, None, True), daemon=True))
         for t in threads:
             t.start()
         if cfg["discovery"]:
@@ -132,19 +143,21 @@ class AgentPool:
             answered = dict(self.answered)
         record_agent_contacts(answered)
 
-    def _query(self, host, port, text=None):
+    def _query(self, host, port, text=None, quiet=False):
         try:
             with socket.create_connection((host, port), timeout=self.cfg["connect_timeout"]) as s:
                 send_frame(s, {"type": "info", "token": self.cfg["token"]})
                 info, _ = recv_frame(s)
-            with self.lock:
-                self.answered[text] = True
+            if text is not None:
+                with self.lock:
+                    self.answered[text] = True
             if info.get("type") == "info":
                 self._update(host, port, info)
-            else:
+            elif not quiet:
                 print("DistriBuild: agent %s:%d refused (%s)" % (host, port, info.get("reason")))
         except (OSError, ValueError) as e:
-            print("DistriBuild: agent %s:%d unreachable (%s)" % (host, port, e))
+            if not quiet:
+                print("DistriBuild: agent %s:%d unreachable (%s)" % (host, port, e))
 
     def _update(self, host, port, info):
         try:
@@ -154,10 +167,16 @@ class AgentPool:
         # Keyed by agent name: the same machine can answer from several addresses.
         key = (info.get("name") or host, port)
         with self.lock:
+            if info.get("machine") == machine_id():
+                # Its cores are this build's local slots already; sending it work would count them twice.
+                self.own.setdefault(key, host)
+                return
             a = self.agents.get(key) or RemoteAgent(host, port)
             a.name = info.get("name", host)
             a.slots = int(info.get("slots", 0))
             a.compilers = set(info.get("compilers", []))
+            if info.get("owner_building"):
+                a.skip_until = max(a.skip_until, time.time() + OWNER_BUILDING_BACKOFF)
             self.agents[key] = a
 
     def capacity(self, cid=None):
@@ -167,6 +186,10 @@ class AgentPool:
     def describe(self):
         with self.lock:
             return ", ".join("%s(%d)" % (a.name, a.slots) for a in self.agents.values())
+
+    def own_names(self):
+        with self.lock:
+            return sorted(set(name for name, _port in self.own))
 
     def acquire(self, cid, pch_key=None):
         """Returns (agent, connected socket holding a reserved slot, reply), or None and why not."""
@@ -191,6 +214,9 @@ class AgentPool:
                     return (a, sock, reply), None
                 # "uploading": another job is sending this PCH there. The agent is fine for other PCHs.
                 backoff = {"busy": 1.0, "uploading": 0.0}.get(reply.get("reason"), 30.0)
+                if reply.get("owner_building"):
+                    backoff = OWNER_BUILDING_BACKOFF
+                    reason = "helpers were busy with their own builds"
                 if reply.get("reason") == "uploading":
                     reason = "agents were still receiving this precompiled header"
             except (OSError, ValueError):
@@ -215,6 +241,50 @@ class AgentPool:
                 agent.failed += 1
                 if agent.failed > 3 * (agent.done + 1):
                     agent.skip_until = time.time() + 60
+
+
+class OwnAgentHold:
+    """While a build runs, keeps this PC's own agent from taking work from other PCs.
+
+    The hold is renewed every HOLD_RENEW_SECONDS and runs out after HOLD_SECONDS, so a build that
+    is killed frees the agent within half a minute.
+    """
+
+    def __init__(self, pool, cfg):
+        with pool.lock:
+            self.targets = sorted(set((host, port) for (_name, port), host in pool.own.items()))
+        self.cfg = cfg
+        self.holder = "xgConsole:%d:%d" % (os.getpid(), int(time.time() * 1000))
+        self.stop = threading.Event()
+        self.thread = None
+
+    def send(self, seconds):
+        header = {"type": "hold", "token": self.cfg["token"], "machine": machine_id(), "holder": self.holder,
+                  "seconds": seconds}
+        for host, port in self.targets:
+            try:
+                with socket.create_connection((host, port), timeout=self.cfg["connect_timeout"]) as s:
+                    send_frame(s, header)
+                    recv_frame(s)
+            except (OSError, ValueError):
+                pass  # an older agent, or one that stopped: nothing to hold
+
+    def renew(self):
+        while not self.stop.wait(HOLD_RENEW_SECONDS):
+            self.send(HOLD_SECONDS)
+
+    def __enter__(self):
+        if self.targets:
+            self.send(HOLD_SECONDS)
+            self.thread = threading.Thread(target=self.renew, daemon=True)
+            self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        if self.targets:
+            self.send(0)
+        return False
 
 
 # --------------------------------------------------------------------------- compile analysis
@@ -1035,6 +1105,9 @@ def doctor(cfg):
 
     print("Agents:")
     pool = AgentPool(cfg)
+    if pool.own_names():
+        print("  [ok] this PC's agent (%s) is left out of this PC's builds and pauses for others while they run"
+              % ", ".join(pool.own_names()))
     check(pool.capacity() > 0, "%d remote slots [%s]" % (pool.capacity(), pool.describe()),
           "No agents answered. Start agent.py on the helper PCs, or list them in client.json; check firewall TCP 31890, UDP 31891.")
     print("Compilers on this PC:")
@@ -1101,8 +1174,13 @@ def main(argv):
     print("DistriBuild: %d actions, %d local slots, %d remote slots%s" % (
         len(tasks), cfg["max_local"], remote, (" [%s]" % pool.describe()) if remote else ""))
     sys.stdout.flush()
+    own = pool.own_names()
+    if own:
+        print("DistriBuild: this PC's agent (%s) takes no work from other PCs during this build" % ", ".join(own))
+    sys.stdout.flush()
     builder = Builder(tasks, cfg, pool, stop_on_errors)
-    code = builder.run()
+    with OwnAgentHold(pool, cfg):
+        code = builder.run()
     print_summary(tasks, "finished in %.1fs" % (time.time() - t0))
     report = os.path.join(out_dir, "last_build.csv")
     try:

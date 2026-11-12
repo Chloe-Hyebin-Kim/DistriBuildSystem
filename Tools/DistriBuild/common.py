@@ -8,6 +8,7 @@ header["files"] lists the blobs in order: {"name", "size", "csize", "codec": "zl
 All integers are little-endian.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -138,6 +139,43 @@ def parse_agent_address(text):
     if not host:
         return text, DEFAULT_PORT
     return host, int(port)
+
+
+# --------------------------------------------------------------------------- one PC as developer and helper
+
+# A PC that builds tells its own agent to take no work from other PCs: it holds the agent for
+# HOLD_SECONDS and renews every HOLD_RENEW_SECONDS, so a build that dies frees the agent soon after.
+HOLD_SECONDS = 30
+HOLD_RENEW_SECONDS = 10
+_machine = None
+
+
+def machine_id():
+    """The same short id for every DistriBuild program on this PC, so a build can tell its own agent apart.
+
+    It is a hash: the agent's answer to discovery is unauthenticated, and the raw Windows id stays on the PC.
+    """
+    global _machine
+    if _machine is None:
+        raw = None
+        if IS_WINDOWS:
+            try:
+                import winreg
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0,
+                                    winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                    raw = winreg.QueryValueEx(key, "MachineGuid")[0]
+            except OSError:
+                pass
+        else:
+            for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+                try:
+                    with open(path, encoding="ascii") as f:
+                        raw = f.read().strip() or None
+                    break
+                except OSError:
+                    pass
+        _machine = hashlib.sha256(("distribuild:%s" % (raw or socket.gethostname())).encode("utf-8")).hexdigest()[:16]
+    return _machine
 
 
 STALE_AFTER_DAYS = 7

@@ -19,6 +19,9 @@ agent.json (all keys optional):
   "compilers": ["C:/Program Files/Microsoft Visual Studio/2022/Professional/VC/Tools/MSVC/14.38.33130/bin/Hostx64/x64/cl.exe"],
   "auto_detect": true
 }
+
+A PC can be a developer PC and a helper at once. While a build runs on this PC, xgConsole skips this
+agent and holds it, and the agent takes no new jobs from other PCs until the build ends.
 """
 
 import argparse
@@ -38,8 +41,10 @@ import threading
 import time
 
 from common import (DEFAULT_PORT, DISCOVERY_PORT, DISCOVERY_PROBE, IS_WINDOWS, SAFE_BLOB_NAME, SAFE_BUNDLE_HASH,
-                    compiler_family, compiler_id, decode_output, log, recv_file_stream, recv_frame,
+                    compiler_family, compiler_id, decode_output, log, machine_id, recv_file_stream, recv_frame,
                     remap_shader_source_dirs, send_frame, set_log_file, split_cmdline)
+
+MAX_HOLD_SECONDS = 120
 
 BIN_PLATFORM = {"Windows": "Win64", "Linux": "Linux", "Darwin": "Mac"}.get(platform.system(), "Win64")
 SCW_NAME = "ShaderCompileWorker.exe" if IS_WINDOWS else "ShaderCompileWorker"
@@ -175,14 +180,41 @@ class Agent:
         self.completed = 0
         self.failed = 0
         self.started = time.time()
+        # Builds on this PC skip this agent (same machine id) and hold it, so it takes no work from
+        # other PCs while its owner builds. Tests run "helpers" on the developer's PC and override it.
+        self.machine = os.environ.get("DISTRIBUILD_AGENT_MACHINE") or machine_id()
+        self.holds = {}             # holder -> time the hold runs out
+        self.was_building = False
+
+    def owner_building(self):
+        """True while a build on this PC holds the agent. Call with self.lock held."""
+        now = time.time()
+        for holder in [h for h, until in self.holds.items() if until <= now]:
+            del self.holds[holder]
+        building = bool(self.holds)
+        if building != self.was_building:
+            self.was_building = building
+            log("this PC is building: no new jobs from other PCs" if building
+                else "this PC finished building: taking jobs from other PCs again")
+        return building
+
+    def hold(self, holder, seconds):
+        """A build on this PC starts (seconds > 0), is still running (renewal) or ends (0)."""
+        with self.lock:
+            if seconds > 0:
+                self.holds[holder] = time.time() + min(seconds, MAX_HOLD_SECONDS)
+            else:
+                self.holds.pop(holder, None)
+            self.owner_building()
 
     def info(self):
         with self.lock:
+            building = self.owner_building()
             return {
-                "type": "info", "protocol": 1, "name": self.name, "port": self.port,
+                "type": "info", "protocol": 1, "name": self.name, "port": self.port, "machine": self.machine,
                 "platform": platform.system(), "slots": self.slots, "active": self.active,
-                "free": self.slots - self.active, "engines": sorted(self.engines),
-                "compilers": sorted(self.compilers), "completed": self.completed,
+                "free": 0 if building else self.slots - self.active, "owner_building": building,
+                "engines": sorted(self.engines), "compilers": sorted(self.compilers), "completed": self.completed,
                 "failed": self.failed, "uptime": int(time.time() - self.started),
             }
 
@@ -258,11 +290,14 @@ class Agent:
         return changed
 
     def try_reserve(self):
+        """None when a slot was taken, else why not: "busy", or "owner_building" while this PC builds."""
         with self.lock:
+            if self.owner_building():
+                return "owner_building"
             if self.active >= self.slots:
-                return False
+                return "busy"
             self.active += 1
-            return True
+            return None
 
     def release(self, ok):
         with self.lock:
@@ -499,11 +534,25 @@ class Handler(socketserver.BaseRequestHandler):
             if kind == "set_token":
                 send_frame(sock, agent.set_token(hdr.get("new_token"), self.client_address[0]))
                 return
+            if kind == "hold":
+                # Only a build on this very PC may pause it for others.
+                if hdr.get("machine") != agent.machine:
+                    send_frame(sock, {"ok": False, "reason": "not_this_pc"})
+                    return
+                try:
+                    seconds = float(hdr.get("seconds", 0))
+                except (TypeError, ValueError):
+                    seconds = 0.0
+                agent.hold(str(hdr.get("holder", ""))[:200], seconds)
+                send_frame(sock, {"ok": True})
+                return
             if kind != "reserve":
                 send_frame(sock, {"ok": False, "reason": "expected reserve"})
                 return
-            if not agent.try_reserve():
-                send_frame(sock, {"ok": False, "reason": "busy"})
+            refused = agent.try_reserve()
+            if refused:
+                # Plugins treat any reason but "busy" as a failed job, so the pause is a separate flag.
+                send_frame(sock, {"ok": False, "reason": "busy", "owner_building": refused == "owner_building"})
                 return
             ok = False
             bundle, pch = hdr.get("source_bundle"), hdr.get("pch")

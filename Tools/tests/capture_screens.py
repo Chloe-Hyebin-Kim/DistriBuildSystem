@@ -33,6 +33,8 @@ work = tempfile.mkdtemp(prefix="dbshots")
 real_home = os.path.expanduser("~")
 os.environ["USERPROFILE"] = os.environ["HOME"] = work
 os.environ.pop("DISTRIBUILD_CONFIG", None)
+# The agent in the pictures stands for another PC, not this one.
+os.environ["DISTRIBUILD_AGENT_MACHINE"] = "screens-helper"
 sys.path.insert(0, TOOLS)
 
 import setup_gui as gui  # noqa: E402  (the environment above must be set first)
@@ -105,13 +107,12 @@ def rewrite_log(window, scrub, keep):
             window.append_log(line)
 
 
-def shoot(window, index, name, scrub, keep=lambda line: True, width=1180, log_top=False):
-    """Grows the window until its tab no longer scrolls, then saves it."""
-    window.tabs.setCurrentIndex(index)
-    page = window.tabs.widget(index)
+def shoot(window, page, name, scrub, keep=lambda line: True, width=1180, height=880, log_top=False):
+    """Grows the window until the tab holding page no longer scrolls, then saves it."""
+    window.tabs.setCurrentIndex(window.tabs.indexOf(page))
     scrub_window(window, scrub)
     rewrite_log(window, scrub, keep)
-    window.resize(width, 880)
+    window.resize(width, height)
     app.processEvents()
     for _ in range(10):
         bars = [area.verticalScrollBar() for area in page.findChildren(gui.QScrollArea)]
@@ -154,12 +155,15 @@ def main():
     helper.autostart = None
     helper.update_autostart_state()
     scrub = scrubber()
+    pump(lambda: developer.status is not None and developer.refresh_button.isEnabled())
+    window.both.update_state()
     window.log_view.clear()
+    shoot(window, window.both, "setup-both", scrub, height=560)
     helper.start_agent()
     if not pump(lambda: gui.port_in_use(gui.DEFAULT_PORT), 60):
         sys.exit("the agent did not start")
     pump(lambda: False, 2)  # let its first log lines arrive
-    shoot(window, 0, "setup-helper", scrub, log_top=True,
+    shoot(window, helper, "setup-helper", scrub, log_top=True,
           keep=lambda line: "헬퍼 PC" not in line and "고정 주소" not in line and not line.lstrip().startswith("->"))
     window.log_view.clear()
 
@@ -176,7 +180,7 @@ def main():
     developer.agent_table.resizeColumnToContents(3)
 
     try:
-        shoot(window, 1, "setup-developer", scrub, width=1300)
+        shoot(window, developer, "setup-developer", scrub, width=1300)
         developer.change_tokens("new-team-token")
         pump(lambda: developer.token_box is not None and developer.token_button.isEnabled(), 60)
         box = developer.token_box

@@ -36,6 +36,8 @@ args = parser.parse_args()
 work = tempfile.mkdtemp(prefix="dbgui")
 os.environ["USERPROFILE"] = os.environ["HOME"] = work
 os.environ.pop("DISTRIBUILD_CONFIG", None)
+# The agents started here stand for other PCs; one section takes this off to test this PC's own agent.
+os.environ["DISTRIBUILD_AGENT_MACHINE"] = "gui-test-helper"
 if not args.screens:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, TOOLS)
@@ -231,11 +233,40 @@ def main():
     developer.addresses.remove(recent)
     developer.save()
 
+    print("This PC's own agent:")
+    own_env = dict(os.environ)
+    own_env.pop("DISTRIBUILD_AGENT_MACHINE")  # this one is this PC's agent
+    own_port = FIXED_PORT + 1
+    own_token = developer.token.text()
+    own = subprocess.Popen([sys.executable, os.path.join(TOOLS, "agent.py"), "--port", str(own_port), "--token", own_token,
+                            "--no-auto-detect"], env=own_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        check(pump(lambda: gui.port_in_use(own_port), 60), "an agent of this PC is running")
+        own_address = "127.0.0.1:%d" % own_port
+        developer.addresses.append(own_address)
+        developer.find_agents()
+        pump(lambda: settled(developer.find_button) and any(r["address"] == own_address for r in developer.agent_rows))
+        rows = {r[0]: r for r in table_rows(developer.agent_table)}
+        check(rows.get(own_address, [""] * 6)[5] == "이 PC", "the helper list marks it as this PC")
+        request = gui.request
+        request("127.0.0.1", own_port, {"type": "hold", "token": developer.token.text(), "machine": gui.machine_id(),
+                                        "holder": "gui-test", "seconds": 30})
+        developer.find_agents()
+        pump(lambda: settled(developer.find_button) and any(r["address"] == own_address and (r["info"] or {}).get("owner_building")
+                                                            for r in developer.agent_rows))
+        rows = {r[0]: r for r in table_rows(developer.agent_table)}
+        check("자기 빌드 중이라 쉼" in rows.get(own_address, [""] * 6)[3], "and shows when it pauses for its own build")
+    finally:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(own.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        own.wait(10)
+    developer.addresses.remove(own_address)
+    developer.save()
+
     print("Pictures:")
     if args.screens:
         os.makedirs(args.screens, exist_ok=True)
-        for index, name in enumerate(("helper", "developer")):
-            window.tabs.setCurrentIndex(index)
+        for page, name in ((window.both, "both"), (helper, "helper"), (developer, "developer")):
+            window.tabs.setCurrentIndex(window.tabs.indexOf(page))
             app.processEvents()
             window.grab().save(os.path.join(args.screens, name + ".png"))
         check(True, "saved to %s" % args.screens)
@@ -253,6 +284,8 @@ def main():
     copied = os.path.join(package, "msvc", cid, "cl.exe")
     check(os.path.isfile(copied) and compiler_id(copied) == cid, "the packaged compiler keeps its id")
     check(os.path.isfile(os.path.join(package, "DistriBuildAgent.exe")), "the agent program is included")
+    check(all(os.path.isfile(os.path.join(package, name)) for name in gui.PACKAGE_DEVELOPER_FILES),
+          "so is what makes it a developer PC too (installer, service source, xgConsole.exe)")
     with open(os.path.join(package, "agent.json"), encoding="utf-8") as f:
         check(json.load(f) == {}, "a new package has its own empty settings file")
     original_app_dir = gui.APP_DIR
@@ -424,6 +457,35 @@ def main():
         script = base64.b64decode(command.split("-EncodedCommand ")[-1].split()[0]).decode("utf-16-le") if recorded else ""
         check('schtasks /Delete /TN "%s"' % gui.AUTOSTART_TASK in command and r"D:\old\a.log" in script
               and expected[-1] in script, "it deletes the task and ends both the old and the current agent")
+
+        print("Developer and helper on one PC, in one step:")
+        both = window.both
+        gui.autostart_query = lambda: None
+        helper.scan()
+        pump(lambda: helper.autostart is None and settled(helper.rescan_button))
+        recorded.clear()
+        both.token.setText("team-token-2")
+        both.set_up()
+        check(pump(lambda: bool(recorded) and settled(both.setup_button), 30), "everything asks for UAC once")
+        command = recorded[0][0] if recorded else ""
+        check("install_client.bat" in command and "netsh advfirewall firewall add rule" in command
+              and 'schtasks /Create /TN "%s"' % gui.AUTOSTART_TASK in command, "that one prompt installs, opens the firewall and adds the task")
+        check(command.index("install_client.bat") < command.index("netsh") < command.index("schtasks /Create") if recorded else False,
+              "in that order, each step only if the one before worked")
+        check(gui.read_config(helper.config_path, lambda line: None).get("token") == "team-token-2"
+              and xgconsole.load_config()["token"] == "team-token-2", "the token is saved for both roles")
+        gui.autostart_query = lambda: {"command": expected[0], "arguments": subprocess.list2cmdline(expected[1:]),
+                                       "log": expected[-1]}
+        helper.scan()
+        pump(lambda: helper.autostart is not None and settled(helper.rescan_button))
+        check("자동 시작" in both.state_labels["autostart"].text() and "꺼짐" not in both.state_labels["autostart"].text(),
+              "the page shows what is set up")
+        recorded.clear()
+        both.remove()
+        check(pump(lambda: bool(recorded) and settled(both.remove_button), 30), "removing asks for UAC once")
+        command = recorded[0][0] if recorded else ""
+        check("uninstall_client.bat" in command and "schtasks /Delete" in command and "netsh advfirewall firewall delete rule" in command,
+              "and undoes all three")
     finally:
         gui.run_elevated, gui.autostart_query = real_run_elevated, real_query
     window.close()

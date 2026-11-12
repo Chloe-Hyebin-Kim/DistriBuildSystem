@@ -50,8 +50,8 @@ except ImportError:
 
 from agent import detect_compilers, detect_engines, package_compilers
 from common import (DEFAULT_PORT, DISCOVERY_PORT, STALE_AFTER_DAYS, compiler_family, compiler_id, contact_note,
-                    decode_output, discover_agents, load_agent_contacts, parse_agent_address, record_agent_contacts,
-                    request)
+                    decode_output, discover_agents, load_agent_contacts, machine_id, parse_agent_address,
+                    record_agent_contacts, request)
 
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
@@ -63,6 +63,9 @@ FIREWALL_TCP = "DistriBuild Agent TCP"
 FIREWALL_UDP = "DistriBuild Agent UDP"
 AUTOSTART_TASK = "DistriBuild Agent"
 PACKAGE_EXES = ("DistriBuildSetup.exe", "DistriBuildAgent.exe")
+# What install_client.bat needs, so a PC set up from a package can be a developer PC too.
+PACKAGE_DEVELOPER_FILES = ("install_client.bat", "uninstall_client.bat", os.path.join("service", "DistriBuildXgeShim.cs"),
+                           os.path.join("dist", "xgConsole.exe"))
 # A cross compiler also needs the host toolset's DLLs, so only x64-hosted x64 copies work on their own.
 PACKAGEABLE = re.compile(r"^msvc-.*-x64$")
 GOOD, BAD, NEUTRAL = "#2e7d32", "#c62828", "#808080"
@@ -476,7 +479,8 @@ def change_all_tokens(addresses, discovery_port, old, new):
 
 
 def build_package(dest, compilers, report):
-    """Fills dest with what a helper PC needs. dest may also be a helper's package folder in use.
+    """Fills dest with what a helper PC needs, and what makes it a developer PC too. dest may also be a
+    helper's package folder in use.
 
     Returns {"missing": programs not found here, "busy": programs left as they were because they are running}.
     """
@@ -491,12 +495,16 @@ def build_package(dest, compilers, report):
         with open(config, "w", encoding="utf-8") as f:
             f.write("{}\n")
         report("빈 설정 파일을 만들었습니다: agent.json")
-    for name in PACKAGE_EXES:
-        source = next((os.path.join(f, name) for f in folders if os.path.isfile(os.path.join(f, name))), None)
+    wanted = [(name, next((os.path.join(f, name) for f in folders if os.path.isfile(os.path.join(f, name))), None))
+              for name in PACKAGE_EXES]
+    wanted += [(name, os.path.join(tools, name) if tools and os.path.isfile(os.path.join(tools, name)) else None)
+               for name in PACKAGE_DEVELOPER_FILES]
+    for name, source in wanted:
         if source is None:
             result["missing"].append(name)
             continue
         target = os.path.join(dest, name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
         if os.path.normcase(os.path.abspath(source)) == os.path.normcase(os.path.abspath(target)):
             continue
         report("복사 중: %s" % name)
@@ -724,6 +732,7 @@ class HelperPage(Page):
         self.process = None
         self.listening = False
         self.autostart = None
+        self.firewall_state = None
         self.pick_up_packaged_compilers()
         self.build_ui()
         self.scan()
@@ -910,10 +919,11 @@ class HelperPage(Page):
         self.listening = result["listening"]
         self.autostart = result["autostart"]
         self.update_run_state()
-        state = result["firewall"]
+        state = self.firewall_state = result["firewall"]
         text = {True: "TCP %d, UDP %d 허용됨", False: "TCP %d, UDP %d 규칙 없음 (다른 PC에서 접속하려면 필요)",
                 None: "TCP %d, UDP %d: 이 운영체제에서는 직접 확인하세요"}[state]
         self.firewall_status.setText(status_html(state, text % (self.port.value(), self.discovery_port.value())))
+        self.window_.state_changed()
 
     def is_running(self):
         return self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning
@@ -955,15 +965,16 @@ class HelperPage(Page):
             markers.add(self.autostart["log"])
         return sorted(markers)
 
-    def enable_autostart(self):
+    def prepare_autostart(self):
+        """Saves the settings and writes the task file. Returns (UAC command, task file), or None after logging why not."""
         command = autostart_command(self.config_path)
         if command is None:
             self.log("[!!] DistriBuildAgent.exe를 이 프로그램과 같은 폴더에 두어야 합니다.")
-            return
+            return None
         if not self.autostart and not self.is_running() and port_in_use(self.port.value()):
             self.log("[!!] 포트 %d을 다른 프로그램이 쓰고 있습니다. 그 프로그램을 끄거나 포트를 바꾼 뒤 다시 누르세요."
                      % self.port.value())
-            return
+            return None
         self.save()
         if self.is_running():
             self.log("이 창에서 시작한 에이전트를 멈추고 자동 시작 에이전트로 바꿉니다.")
@@ -971,17 +982,21 @@ class HelperPage(Page):
         handle, xml_path = tempfile.mkstemp(prefix="distribuild_task_", suffix=".xml")
         with os.fdopen(handle, "w", encoding="utf-16") as f:
             f.write(autostart_task_xml(command, APP_DIR))
+        return autostart_enable_command(xml_path, self.autostart_markers()), xml_path
 
-        def done():
-            try:
-                os.remove(xml_path)
-            except OSError:
-                pass
-            # The agent needs a moment to look for compilers before it listens.
-            QTimer.singleShot(4000, self.scan)
+    def autostart_started(self, xml_path):
+        try:
+            os.remove(xml_path)
+        except OSError:
+            pass
+        # The agent needs a moment to look for compilers before it listens.
+        QTimer.singleShot(4000, self.scan)
 
-        self.elevate(autostart_enable_command(xml_path, self.autostart_markers()),
-                     self.autostart_on_button, "자동 시작 켜기", done)
+    def enable_autostart(self):
+        prepared = self.prepare_autostart()
+        if prepared:
+            command, xml_path = prepared
+            self.elevate(command, self.autostart_on_button, "자동 시작 켜기", lambda: self.autostart_started(xml_path))
 
     def disable_autostart(self):
         self.elevate(autostart_disable_command(self.autostart_markers()),
@@ -1077,6 +1092,7 @@ class DeveloperPage(Page):
         self.compiler_paths = {}
         self.agent_rows = []
         self.token_box = None
+        self.status = None
         self.tools = find_tools_dir()
         self.build_ui()
         self.refresh_status()
@@ -1282,6 +1298,7 @@ class DeveloperPage(Page):
         self.bus.start(lambda: developer_status(folder), self.show_status, self.refresh_button)
 
     def show_status(self, s):
+        self.status = s
         built = s["xgconsole_built"]
         self.state_labels["built"].setText(status_html(built, "xgConsole.exe 빌드됨" if built else "xgConsole.exe가 없음 (빌드 필요)"))
         real = s["real_incredibuild"]
@@ -1293,28 +1310,44 @@ class DeveloperPage(Page):
         self.state_labels["service"].setText(status_html(*service))
         placed = s["installed"] and s["on_path"]
         self.state_labels["path"].setText(status_html(placed, "xgConsole이 설치되어 PATH에 있음" if placed else "xgConsole이 설치 폴더나 PATH에 없음"))
-        self.build_button.setEnabled(bool(self.tools))
+        # A helper package carries xgConsole.exe ready-made but not the sources to build it.
+        self.build_button.setEnabled(bool(self.tools) and os.path.isfile(os.path.join(self.tools, "build_xgconsole.bat")))
         self.install_button.setEnabled(bool(self.tools) and built and not real and s["service"] != "foreign")
         self.uninstall_button.setEnabled(bool(self.tools) and s["service"] != "foreign")
         if not self.tools:
             self.install_button.setToolTip("install_client.bat이 있는 폴더에서 실행해야 합니다.")
+        self.window_.state_changed()
 
     def build_xgconsole(self):
         self.window_.run_process("cmd.exe", ["/c", os.path.join(self.tools, "build_xgconsole.bat")], self.build_button,
                                  cwd=self.tools, done=lambda _code: self.refresh_status())
 
+    def install_command(self):
+        """The UAC command that installs xgConsole, or None after logging why it cannot."""
+        if not self.tools:
+            self.log("[!!] install_client.bat이 있는 폴더에서 실행해야 합니다.")
+            return None
+        if not os.path.isfile(os.path.join(self.tools, "dist", "xgConsole.exe")):
+            self.log("[!!] xgConsole.exe가 없습니다. 먼저 xgConsole을 빌드하세요.")
+            return None
+        return 'call "%s" "%s"' % (os.path.join(self.tools, "install_client.bat"), self.install_folder())
+
+    def uninstall_command(self):
+        return self.tools and 'call "%s" "%s"' % (os.path.join(self.tools, "uninstall_client.bat"), self.install_folder())
+
+    def installed(self):
+        self.log("PATH 변경은 새로 여는 터미널과 다시 시작한 Visual Studio부터 적용됩니다.")
+        self.refresh_status()
+
     def install(self):
-        command = 'call "%s" "%s"' % (os.path.join(self.tools, "install_client.bat"), self.install_folder())
-
-        def finished():
-            self.log("PATH 변경은 새로 여는 터미널과 다시 시작한 Visual Studio부터 적용됩니다.")
-            self.refresh_status()
-
-        self.elevate(command, self.install_button, "설치", finished)
+        command = self.install_command()
+        if command:
+            self.elevate(command, self.install_button, "설치", self.installed)
 
     def uninstall(self):
-        command = 'call "%s" "%s"' % (os.path.join(self.tools, "uninstall_client.bat"), self.install_folder())
-        self.elevate(command, self.uninstall_button, "제거", self.refresh_status)
+        command = self.uninstall_command()
+        if command:
+            self.elevate(command, self.uninstall_button, "제거", self.refresh_status)
 
     def run_doctor(self):
         path = fresh_path()
@@ -1371,6 +1404,11 @@ class DeveloperPage(Page):
             state = row["error"] or "연결됨"
             if row.get("note"):
                 state += " (%s)" % row["note"]
+            if usable and info.get("owner_building"):
+                state += " (자기 빌드 중이라 쉼)"
+            if info.get("machine") == machine_id():
+                kind, color = "이 PC", None
+                missing = "이 PC의 빌드에는 쓰지 않습니다. 이 PC가 빌드하는 동안에는 다른 PC의 작업도 받지 않습니다."
             if row.get("stale"):
                 missing = "빌드할 때마다 이 주소에 연결을 시도하느라 기다립니다. 더 쓰지 않는 헬퍼면 제거하세요."
             add_table_row(table, [row["address"], info.get("name", "-"), info.get("slots", "-"),
@@ -1447,6 +1485,119 @@ class DeveloperPage(Page):
 
 # --------------------------------------------------------------------------- window
 
+# --------------------------------------------------------------------------- both roles on one PC
+
+class BothPage(Page):
+    """Sets this PC up as a developer PC and a helper at once: one token, one UAC prompt.
+
+    Builds on this PC skip its own agent and pause it for other PCs while they run, so every PC of a
+    team can be set up the same way and helps whenever it is not building.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.helper, self.developer = window.helper, window.developer
+        intro = QLabel("이 PC를 개발자 PC이자 헬퍼 PC로 씁니다. 빌드하지 않을 때는 다른 PC의 빌드를 돕고, "
+                       "이 PC에서 빌드를 시작하면 끝날 때까지 다른 PC의 작업을 받지 않습니다. "
+                       "팀의 모든 PC에서 같은 토큰으로 한 번씩 설정하세요.")
+        intro.setWordWrap(True)
+        self.token = QLineEdit(self.developer.token.text() or self.helper.token.text())
+        self.token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token.setPlaceholderText("팀이 함께 쓰는 토큰")
+        form = QFormLayout()
+        form.addRow("토큰", self.token)
+        self.state_labels = {key: QLabel() for key in ("developer", "firewall", "autostart")}
+        states = QVBoxLayout()
+        for label in self.state_labels.values():
+            label.setWordWrap(True)
+            states.addWidget(label)
+        self.setup_button = QPushButton("모두 설정 (관리자)")
+        self.setup_button.clicked.connect(self.set_up)
+        self.remove_button = QPushButton("모두 해제 (관리자)")
+        self.remove_button.clicked.connect(self.remove)
+        refresh = QPushButton("상태 새로고침")
+        refresh.clicked.connect(self.refresh)
+        note = QLabel("모두 설정: 토큰을 두 탭에 저장하고, UAC 한 번으로 xgConsole 설치, 방화벽 열기, PC를 켜면 "
+                      "에이전트 자동 시작을 합니다. 세부 설정은 헬퍼 PC 탭과 개발자 PC 탭에서 바꿉니다.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: %s" % NEUTRAL)
+        layout = QVBoxLayout()
+        layout.addWidget(intro)
+        layout.addLayout(form)
+        layout.addLayout(states)
+        layout.addLayout(button_row(self.setup_button, self.remove_button, refresh))
+        layout.addWidget(note)
+        group = QGroupBox("이 PC를 개발자 겸 헬퍼로")
+        group.setLayout(layout)
+        outer = QVBoxLayout(self)
+        outer.addWidget(group)
+        outer.addStretch(1)
+        self.update_state()
+
+    def showEvent(self, event):
+        # The other tabs may have changed the token meanwhile.
+        if not self.token.hasFocus():
+            self.token.setText(self.developer.token.text() or self.helper.token.text())
+        super().showEvent(event)
+
+    def refresh(self):
+        self.developer.refresh_status()
+        self.helper.scan()
+
+    def update_state(self):
+        s = self.developer.status
+        if s is None:
+            developer = (None, "개발자: 확인 중...")
+        else:
+            ready = s["installed"] and s["on_path"] and s["service"] in ("running", "unsupported")
+            developer = (ready, "개발자: UBT가 DistriBuild로 빌드함" if ready else "개발자: 설치 안 됨 (xgConsole, 서비스, PATH)")
+        firewall = {True: (True, "헬퍼: 방화벽 열림"), False: (False, "헬퍼: 방화벽 규칙 없음"),
+                    None: (None, "헬퍼: 방화벽 확인 중...")}[self.helper.firewall_state]
+        task, command = self.helper.autostart, autostart_command(self.helper.config_path)
+        if task and command and autostart_matches(task, command):
+            autostart = (True, "헬퍼: PC를 켜면 에이전트 자동 시작" + (" (실행 중)" if self.helper.listening else ""))
+        elif task:
+            autostart = (False, "헬퍼: 자동 시작이 다른 위치의 에이전트를 실행함 (모두 설정으로 다시 등록)")
+        else:
+            autostart = (False, "헬퍼: 자동 시작 꺼짐")
+        for key, value in (("developer", developer), ("firewall", firewall), ("autostart", autostart)):
+            self.state_labels[key].setText(status_html(*value))
+
+    def set_up(self):
+        token = self.token.text()
+        if token and not valid_token(token):
+            self.log("[!!] 토큰에는 공백 없이 256자까지 쓸 수 있습니다.")
+            return
+        if not token:
+            self.log("토큰 없이 설정합니다. 같은 네트워크의 누구나 이 PC에 작업을 보낼 수 있습니다.")
+        for page in (self.helper, self.developer):
+            page.token.setText(token)
+        self.developer.save()
+        install = self.developer.install_command()
+        if not install:
+            return
+        prepared = self.helper.prepare_autostart()  # saves the helper settings too
+        if not prepared:
+            return
+        autostart, xml_path = prepared
+        firewall = firewall_open_command(self.helper.port.value(), self.helper.discovery_port.value())
+        command = " && ".join("(%s)" % step for step in (install, firewall, autostart))
+
+        def done():
+            self.developer.installed()
+            self.helper.autostart_started(xml_path)
+
+        self.elevate(command, self.setup_button, "개발자 겸 헬퍼 설정", done)
+
+    def remove(self):
+        steps = [autostart_disable_command(self.helper.autostart_markers()), firewall_close_command()]
+        uninstall = self.developer.uninstall_command()
+        if uninstall:
+            steps.insert(0, uninstall)
+        # Every step runs even if an earlier one finds nothing to remove.
+        self.elevate(" & ".join("(%s)" % step for step in steps), self.remove_button, "개발자 겸 헬퍼 해제", self.refresh)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1462,9 +1613,12 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumBlockCount(5000)
         self.bus.line.connect(self.append_log)
 
+        self.both = None
         self.helper = HelperPage(self)
         self.developer = DeveloperPage(self)
+        self.both = BothPage(self)
         self.tabs = QTabWidget()
+        self.tabs.addTab(self.both, "개발자 겸 헬퍼")
         self.tabs.addTab(self.helper, "헬퍼 PC")
         self.tabs.addTab(self.developer, "개발자 PC")
 
@@ -1474,6 +1628,10 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setSizes([740, 130])
         self.setCentralWidget(splitter)
+
+    def state_changed(self):
+        if self.both is not None:
+            self.both.update_state()
 
     @Slot(str)
     def append_log(self, text):

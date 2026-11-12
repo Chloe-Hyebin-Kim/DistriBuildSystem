@@ -25,6 +25,8 @@ import xml.etree.ElementTree as ET
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.normpath(os.path.join(HERE, "..", "DistriBuild"))
 sys.path[:0] = [TOOLS, HERE]
+# The agents here stand for other PCs; builds would otherwise leave this PC's own agent out.
+os.environ["DISTRIBUILD_AGENT_MACHINE"] = "e2e-helper"
 from check_plugin_headers import DEFINES, scan_headers  # noqa: E402
 from common import PROTOCOL_VERSION, recv_frame, remap_shader_source_dirs, request, send_frame  # noqa: E402
 

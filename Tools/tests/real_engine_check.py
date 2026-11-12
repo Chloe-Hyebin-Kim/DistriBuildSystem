@@ -26,6 +26,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.normpath(os.path.join(HERE, "..", "DistriBuild"))
+# The agent here stands for another PC; builds would otherwise leave this PC's own agent out.
+os.environ["DISTRIBUILD_AGENT_MACHINE"] = "real-check-helper"
 FAILED = []
 
 
