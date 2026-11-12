@@ -288,8 +288,13 @@ def main():
           "so is what makes it a developer PC too (installer, service source, xgConsole.exe)")
     with open(os.path.join(package, "agent.json"), encoding="utf-8") as f:
         check(json.load(f) == {}, "a new package has its own empty settings file")
+    with open(os.path.join(package, gui.MANUAL), encoding="utf-8") as f:
+        check("보내는 사람" in f.read(), "and the manual for whoever gets it")
     original_app_dir = gui.APP_DIR
     gui.APP_DIR = package
+    again = os.path.join(work, "package from a package")
+    gui.build_package(again, {}, lambda text: None)
+    check(os.path.isfile(os.path.join(again, gui.MANUAL)), "a package made from a package carries the manual on")
     check(gui.helper_config_path() == os.path.join(package, "agent.json"), "so the helper window run from it keeps its settings there")
     helper.compilers = [copied]
     helper.pick_up_packaged_compilers()

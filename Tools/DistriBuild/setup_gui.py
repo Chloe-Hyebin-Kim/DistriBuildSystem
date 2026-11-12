@@ -66,6 +66,8 @@ PACKAGE_EXES = ("DistriBuildSetup.exe", "DistriBuildAgent.exe")
 # What install_client.bat needs, so a PC set up from a package can be a developer PC too.
 PACKAGE_DEVELOPER_FILES = ("install_client.bat", "uninstall_client.bat", os.path.join("service", "DistriBuildXgeShim.cs"),
                            os.path.join("dist", "xgConsole.exe"))
+# The manual for whoever gets the package, as .txt so it opens with a double click. A package carries it on.
+MANUAL = "사용설명서.txt"
 # A cross compiler also needs the host toolset's DLLs, so only x64-hosted x64 copies work on their own.
 PACKAGEABLE = re.compile(r"^msvc-.*-x64$")
 GOOD, BAD, NEUTRAL = "#2e7d32", "#c62828", "#808080"
@@ -499,6 +501,8 @@ def build_package(dest, compilers, report):
               for name in PACKAGE_EXES]
     wanted += [(name, os.path.join(tools, name) if tools and os.path.isfile(os.path.join(tools, name)) else None)
                for name in PACKAGE_DEVELOPER_FILES]
+    manuals = [os.path.join(tools, MANUAL), os.path.join(tools, "..", "..", "docs", "사용설명서.md")] if tools else []
+    wanted.append((MANUAL, next((m for m in manuals if os.path.isfile(m)), None)))
     for name, source in wanted:
         if source is None:
             result["missing"].append(name)

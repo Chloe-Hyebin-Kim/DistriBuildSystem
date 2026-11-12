@@ -2,6 +2,8 @@
 
 Incredibuild처럼 LAN의 여러 PC에 빌드 작업을 나눠 실행합니다. **UE 4.26과 UE 5.8**에서 동작합니다. 엔진 수정은 필요 없습니다.
 
+> 패키지를 받아 설치만 하는 사람은 **[사용설명서](docs/사용설명서.md)** 를 보세요. 무엇을 주고 받는지, 설치와 문제 해결을 저장소 없이 따라 할 수 있게 적었습니다.
+
 | 대상 | 방식 | 구성 요소 |
 |---|---|---|
 | **C++ 컴파일** | UBT의 XGE 실행기가 호출하는 `xgConsole.exe`를 대체합니다. 로컬에서 전처리하고, PCH를 재사용해 원격에서 같은 컴파일러로 컴파일한 뒤 `.obj`를 돌려받습니다. | `Tools/DistriBuild/xgconsole.py`, `install_client.bat` |
@@ -105,7 +107,7 @@ Tools\DistriBuild\build_setup_gui.bat
 
 1. **헬퍼 PC용 패키지**의 **넣을 컴파일러**에서 보낼 컴파일러를 고릅니다. 어느 것을 UBT가 쓰는지 모르면 모두 두세요(하나에 약 100MB).
 2. **찾아보기**로 USB나 공유 폴더를 고르고 **패키지 만들기**를 누릅니다.
-3. 그 폴더에 `DistriBuildSetup.exe`, `DistriBuildAgent.exe`, 빈 설정 파일 `agent.json`, `msvc\<컴파일러 ID>\`가 생깁니다. 그 PC를 개발자 PC로도 쓸 수 있도록 `install_client.bat`, `uninstall_client.bat`, `service\`, `dist\xgConsole.exe`도 들어갑니다.
+3. 그 폴더에 `DistriBuildSetup.exe`, `DistriBuildAgent.exe`, 빈 설정 파일 `agent.json`, `msvc\<컴파일러 ID>\`가 생깁니다. 그 PC를 개발자 PC로도 쓸 수 있도록 `install_client.bat`, `uninstall_client.bat`, `service\`, `dist\xgConsole.exe`도 들어갑니다. 받는 사람이 읽을 [사용설명서](docs/사용설명서.md)도 `사용설명서.txt`로 들어갑니다.
 
 ### 3단계: 헬퍼 PC 설정하기 (헬퍼 PC 탭)
 
