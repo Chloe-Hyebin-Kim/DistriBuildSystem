@@ -39,7 +39,8 @@ if IS_WINDOWS:
     subprocess.Popen = _NoWindowPopen
 
 try:
-    from PySide6.QtCore import QEvent, QObject, QProcess, QProcessEnvironment, Qt, QTimer, Signal, Slot
+    from PySide6.QtCore import (QEvent, QItemSelectionModel, QObject, QProcess, QProcessEnvironment, Qt, QTimer, Signal,
+                                Slot)
     from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QDoubleSpinBox,
                                    QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
@@ -74,6 +75,7 @@ MANUAL = "사용설명서.txt"
 # A cross compiler also needs the host toolset's DLLs, so only x64-hosted x64 copies work on their own.
 PACKAGEABLE = re.compile(r"^msvc-.*-x64$")
 GOOD, BAD, NEUTRAL = "#2e7d32", "#c62828", "#808080"
+WORK_CHECK_MS = 3000  # how often the window asks agents what they are doing
 
 
 # --------------------------------------------------------------------------- paths and files
@@ -354,6 +356,29 @@ def probe_agent(host, port, token, timeout=3.0):
     if reply.get("type") == "info":
         return reply, ""
     return None, "토큰이 맞지 않음" if reply.get("reason") == "auth" else "응답 오류: %s" % reply.get("reason")
+
+
+def work_text(info):
+    """What an agent is doing now, from its info reply, in a few Korean words."""
+    active, slots = info.get("active", 0), info.get("slots", 0)
+    if info.get("owner_building"):
+        now = "이 PC가 빌드 중이라 새 작업을 받지 않음" + (" (받은 작업 %d개 마무리 중)" % active if active else "")
+    elif active:
+        now = "다른 PC 작업 %d개 처리 중 (한 번에 최대 %d개)" % (active, slots)
+    else:
+        now = "쉬는 중"
+    done = "에이전트 시작 후 %d개 처리" % info.get("completed", 0)
+    if info.get("failed"):
+        done += ", 그중 실패 %d개" % info["failed"]
+    return "%s · %s" % (now, done)
+
+
+def probe_own_agent(port, token):
+    """This PC's agent's info reply, or None; never raises, so a periodic check always gets an answer."""
+    try:
+        return probe_agent("127.0.0.1", port, token, timeout=1.0)[0]
+    except Exception:  # a failed check only hides the line until the next one
+        return None
 
 
 def scan_helper(compilers, engines, auto, port, discovery_port, token):
@@ -749,6 +774,8 @@ class HelperPage(Page):
         self.listening = False
         self.autostart = None
         self.firewall_state = None
+        self.work_info = None
+        self.work_check_running = False
         self.pick_up_packaged_compilers()
         self.build_ui()
         self.scan()
@@ -798,6 +825,11 @@ class HelperPage(Page):
         self.stop_button.clicked.connect(self.stop_agent)
         run_layout = QVBoxLayout()
         run_layout.addWidget(self.agent_status)
+        self.work_status = QLabel()
+        self.work_status.setWordWrap(True)
+        self.work_status.setToolTip("3초마다 이 PC의 에이전트에 물어봅니다.")
+        self.work_status.hide()
+        run_layout.addWidget(self.work_status)
         note = QLabel("이 창을 닫으면 여기서 시작한 에이전트도 중지됩니다. 자동 시작된 에이전트는 계속 실행됩니다.")
         note.setWordWrap(True)
         note.setStyleSheet("color: %s" % NEUTRAL)
@@ -887,6 +919,9 @@ class HelperPage(Page):
         outer.addWidget(scrollable(content), 1)
         outer.addLayout(footer)
         self.update_run_state()
+        self.work_timer = QTimer(self)
+        self.work_timer.timeout.connect(self.check_work)
+        self.work_timer.start(WORK_CHECK_MS)
 
     def current_config(self):
         data = dict(self.loaded)
@@ -943,6 +978,29 @@ class HelperPage(Page):
 
     def is_running(self):
         return self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning
+
+    def check_work(self):
+        """Asks this PC's agent what it is doing, so the window shows when other PCs use it."""
+        if self.work_check_running:
+            return
+        if not (self.listening or self.is_running()):
+            if self.work_info is not None:
+                self.show_work(None)
+            return
+        self.work_check_running = True
+        port, token = self.port.value(), self.token.text()
+        self.bus.start(lambda: probe_own_agent(port, token), self.show_work)
+
+    def show_work(self, info):
+        self.work_check_running = False
+        if info == self.work_info:
+            return
+        self.work_info = info
+        if info:
+            busy = bool(info.get("active")) and not info.get("owner_building")
+            self.work_status.setText(status_html(True if busy else None, work_text(info)))
+        self.work_status.setVisible(bool(info))
+        self.window_.state_changed()
 
     def update_run_state(self):
         running = self.is_running()
@@ -1174,8 +1232,10 @@ class DeveloperPage(Page):
         options_group = QGroupBox("빌드 설정")
         options_group.setLayout(options)
 
-        self.agent_table = make_table(["주소", "이름", "슬롯", "상태", "맞는 컴파일러", "구분"])
-        for column, width in enumerate((140, 110, 45, 80, 170)):
+        self.agent_table = make_table(["주소", "이름", "사용 중", "상태", "맞는 컴파일러", "구분", "처리함"])
+        self.agent_table.horizontalHeaderItem(2).setToolTip("지금 처리 중인 작업 수 / 한 번에 받을 수 있는 최대 수")
+        self.agent_table.horizontalHeaderItem(6).setToolTip("그 PC의 에이전트가 시작된 뒤 처리한 작업 수")
+        for column, width in enumerate((140, 110, 60, 80, 170, 90)):
             self.agent_table.setColumnWidth(column, width)
         self.address = QLineEdit()
         self.address.setPlaceholderText("IP 또는 PC 이름 (예: 192.168.0.21:31890)")
@@ -1183,6 +1243,13 @@ class DeveloperPage(Page):
         add = QPushButton("주소 추가")
         add.clicked.connect(self.add_address)
         self.find_button = QPushButton("헬퍼 PC 찾기")
+        self.auto_refresh = QCheckBox("3초마다 새로 고침")
+        self.auto_refresh.setToolTip("켜 두면 헬퍼가 지금 몇 개를 처리 중인지 계속 바뀌어 보입니다.")
+        self.find_generation = 0
+        self.refreshing = False
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_agents)
+        self.refresh_timer.start(WORK_CHECK_MS)
         pin = QPushButton("선택 고정")
         remove = QPushButton("선택 제거")
         self.remove_stale_button = QPushButton("오래 연결 안 된 주소 제거")
@@ -1196,7 +1263,7 @@ class DeveloperPage(Page):
         agents_layout = QVBoxLayout()
         agents_layout.addWidget(self.agent_table, 1)
         agents_layout.addLayout(browse_row(self.address, add))
-        agents_layout.addLayout(button_row(self.find_button, pin, remove, self.remove_stale_button))
+        agents_layout.addLayout(button_row(self.find_button, self.auto_refresh, pin, remove, self.remove_stale_button))
         agents_group = QGroupBox("헬퍼 PC")
         agents_group.setLayout(agents_layout)
 
@@ -1401,13 +1468,40 @@ class DeveloperPage(Page):
         self.address.clear()
         self.find_agents()
 
-    def find_agents(self):
+    def find_agents(self, quiet=False):
+        """Lists the helpers. quiet (the 3-second refresh) neither greys out the button nor writes to the log."""
+        quiet = quiet is True  # a button's clicked signal passes False here
+        self.find_generation += 1
+        generation = self.find_generation
         addresses, port, token = list(self.addresses), self.discovery_port.value(), self.token.text()
-        self.bus.start(lambda: query_agents(addresses, port, token), self.show_agents, self.find_button)
+        if not quiet:
+            self.bus.start(lambda: query_agents(addresses, port, token),
+                           lambda rows: self.show_agents(rows, generation), self.find_button)
+            return
 
-    def show_agents(self, rows):
+        def work():
+            try:
+                return query_agents(addresses, port, token)
+            except Exception:  # a failed refresh is simply tried again 3 seconds later
+                return None
+
+        self.refreshing = True
+        self.bus.start(work, lambda rows: self.show_agents(rows, generation, quiet=True))
+
+    def refresh_agents(self):
+        if (self.auto_refresh.isChecked() and not self.refreshing and self.find_button.isEnabled()
+                and self.isVisible()):
+            self.find_agents(quiet=True)
+
+    def show_agents(self, rows, generation=None, quiet=False):
+        if quiet:
+            self.refreshing = False
+        # A list asked for earlier must not replace a newer one, e.g. bring back an address just removed.
+        if rows is None or (generation is not None and generation != self.find_generation):
+            return
         self.agent_rows = rows
         table = self.agent_table
+        selected = {row["address"] for row in selected_data(table) if row}
         table.setRowCount(0)
         local_ids = set(self.compiler_paths)
         for row in rows:
@@ -1432,10 +1526,20 @@ class DeveloperPage(Page):
                 missing = "이 PC의 빌드에는 쓰지 않습니다. 이 PC가 빌드하는 동안에는 다른 PC의 작업도 받지 않습니다."
             if row.get("stale"):
                 missing = "빌드할 때마다 이 주소에 연결을 시도하느라 기다립니다. 더 쓰지 않는 헬퍼면 제거하세요."
-            add_table_row(table, [row["address"], info.get("name", "-"), info.get("slots", "-"),
-                                  state, match, kind], row, color=color, tooltip=missing)
+            in_use = "%d / %d" % (info.get("active", 0), info["slots"]) if usable and "slots" in info else "-"
+            done = "-"
+            if usable and "completed" in info:
+                done = "%d" % info["completed"] + (" (실패 %d)" % info["failed"] if info.get("failed") else "")
+            add_table_row(table, [row["address"], info.get("name", "-"), in_use, state, match, kind, done],
+                          row, color=color, tooltip=missing)
+            if row["address"] in selected:
+                table.selectionModel().select(table.model().index(table.rowCount() - 1, 0),
+                                              QItemSelectionModel.SelectionFlag.Select
+                                              | QItemSelectionModel.SelectionFlag.Rows)
         stale = [r["address"] for r in rows if r.get("stale")]
         self.remove_stale_button.setEnabled(bool(stale))
+        if quiet:
+            return
         self.log("헬퍼 PC %d대를 확인했습니다." % len(rows))
         if stale:
             self.log("[!!] %d일 넘게 연결되지 않은 고정 주소: %s" % (STALE_AFTER_DAYS, ", ".join(stale)))
@@ -1532,6 +1636,10 @@ class BothPage(Page):
         for label in self.state_labels.values():
             label.setWordWrap(True)
             states.addWidget(label)
+        self.work_label = QLabel()
+        self.work_label.setWordWrap(True)
+        self.work_label.hide()
+        states.addWidget(self.work_label)
         self.setup_button = QPushButton("모두 설정 (관리자)")
         self.setup_button.clicked.connect(self.set_up)
         self.remove_button = QPushButton("모두 해제 (관리자)")
@@ -1583,6 +1691,11 @@ class BothPage(Page):
             autostart = (False, "헬퍼: 자동 시작 꺼짐")
         for key, value in (("developer", developer), ("firewall", firewall), ("autostart", autostart)):
             self.state_labels[key].setText(status_html(*value))
+        info = self.helper.work_info
+        if info:
+            busy = bool(info.get("active")) and not info.get("owner_building")
+            self.work_label.setText(status_html(True if busy else None, "헬퍼: " + work_text(info)))
+        self.work_label.setVisible(bool(info))
 
     def set_up(self):
         token = self.token.text()

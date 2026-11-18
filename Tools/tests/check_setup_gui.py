@@ -126,6 +126,13 @@ def main():
     info, error = gui.probe_agent("127.0.0.1", PORT, TOKEN)
     check(bool(info) and info["name"] == "gui-test" and info["slots"] == 3, "it runs with the saved settings (%s)" % (error or "reply received"))
     check(helper.is_running() and not helper.start_button.isEnabled() and helper.stop_button.isEnabled(), "start/stop buttons follow its state")
+    check(pump(lambda: helper.work_info is not None and "쉬는 중" in helper.work_status.text(), 20),
+          "the helper page shows what its agent is doing")
+    check("헬퍼: 쉬는 중" in window.both.work_label.text(), "and so does the both-roles page")
+    check("다른 PC 작업 2개 처리 중" in gui.work_text({"active": 2, "slots": 8, "completed": 5}),
+          "jobs from other PCs are described")
+    check("새 작업을 받지 않음" in gui.work_text({"active": 1, "slots": 8, "owner_building": True}),
+          "and a pause for this PC's own build")
 
     print("Developer PC page:")
     check(pump(lambda: bool(developer.compiler_paths)), "this PC's compilers are listed")
@@ -143,7 +150,18 @@ def main():
     found = [r for r in rows if r[1] == "gui-test"]
     check(len(found) == 1, "one PC is listed once, though it answers on several addresses")
     check(bool(found) and found[0][3] == "연결됨" and found[0][4] not in ("-", "없음") and found[0][5] == "자동 검색", "the agent is found with matching compilers")
+    check(bool(found) and found[0][2] == "0 / 3" and found[0][6] == "0", "the list shows jobs in use and done")
     developer.agent_table.selectRow(0)
+    picked = [r["address"] for r in gui.selected_data(developer.agent_table)]
+    developer.find_agents(quiet=True)
+    check(developer.refreshing and settled(developer.find_button), "a refresh leaves the find button alone")
+    check(pump(lambda: not developer.refreshing), "the refresh finishes")
+    check([r["address"] for r in gui.selected_data(developer.agent_table)] == picked,
+          "a refresh keeps the selected helper selected")
+    before = len(developer.agent_rows)
+    developer.show_agents([], developer.find_generation - 1, quiet=True)
+    check(len(developer.agent_rows) == before and developer.agent_table.rowCount() == before,
+          "an older refresh never replaces a newer list")
     developer.pin_selected()
     pump(lambda: bool(developer.addresses) and settled(developer.find_button) and any(r["pinned"] for r in developer.agent_rows))
     check(len(developer.addresses) == 1, "a found agent can be pinned")
